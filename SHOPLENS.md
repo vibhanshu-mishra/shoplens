@@ -140,8 +140,8 @@ page number.
 
 ShopLens can build a structured index from a native-text `SHEET LIST`,
 `DRAWING LIST`, `INDEX OF DRAWINGS`, or `SHEET INDEX` table. This is the
-architect's or engineer's declared index. ShopLens does not yet compare it with
-the title block printed on each actual drawing sheet.
+architect's or engineer's declared index. The title-block commands described
+below compare that declared index with the identity printed on each actual page.
 
 By default, only PDF pages 1–5 are parsed because drawing indexes are normally
 near the front of a package and large packages can contain hundreds of pages.
@@ -231,6 +231,93 @@ ShopLens reports `DECLARED_TOTAL_MISMATCH` if it differs from the unique entry
 count. Invalid-row details remain in `--debug`; normal output uses an aggregated
 warning count.
 
+## Extract and reconcile title blocks
+
+Title-block extraction finds likely sheet numbers, scores their label context,
+declared-list support, font prominence, and nearby title text, then discovers
+repeated coordinate clusters within the package. A cluster must be supported by
+at least two pages; its signed raw coordinates are compared with a 60-point
+tolerance. More than one standard or rotated layout can be discovered. Coordinates
+are never converted with `abs()` or tied to an assumed lower-right page corner.
+
+The declared Sheet List is useful supporting evidence, but it is not treated as
+truth by itself. Small references, Sheet List rows, and frequently repeated project
+identifiers are rejected unless independent title-block label and recurring-layout
+evidence establishes the context. Ambiguous candidates remain unidentified and
+receive a low-confidence warning. Revision is blank unless an explicit nearby
+`REV` or `REVISION` field supplies a clear value.
+
+On macOS, run these commands from the repository directory:
+
+```bash
+python -m shoplens.cli title-blocks \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --list
+python -m shoplens.cli title-blocks \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --page 27
+python -m shoplens.cli title-blocks \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --json
+python -m shoplens.cli title-blocks \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --debug
+
+python -m shoplens.cli reconcile-sheets \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --list
+python -m shoplens.cli reconcile-sheets \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --json
+```
+
+`--page` filters displayed title-block records only after layouts are discovered
+from the complete package. The reader uses short-lived, bounded extraction workers
+to keep large native-text drawing sets within predictable memory. `--debug` exposes
+all candidate scores and reasons, rejections, selected title fragments, confidence,
+and discovered layout clusters; normal output remains concise.
+
+Reconciliation uses these statuses:
+
+- `MATCH`: number and normalized title agree.
+- `TITLE_VARIATION`: number agrees and only harmless punctuation, spacing,
+  hyphenation, or a supported abbreviation differs.
+- `TITLE_MISMATCH`: number agrees but the titles differ meaningfully.
+- `DECLARED_BUT_MISSING`: a declared number has no identified actual page.
+- `PRESENT_BUT_UNDECLARED`: an identified actual number is absent from the list.
+- `DUPLICATE_SHEET_NUMBER`: one actual number appears on multiple PDF pages.
+- `UNIDENTIFIED_PAGE`: no reliable candidate exists.
+- `LOW_CONFIDENCE`: a candidate or title exists but evidence is insufficient.
+
+Title comparison uppercases text, collapses whitespace, normalizes hyphen spacing,
+and compares a small explicit abbreviation vocabulary. The JSON
+`title_similarity` value is Python's deterministic character-sequence ratio after
+strict normalization; status does not rely on an LLM or semantic embedding.
+
+Example title-block JSON fields:
+
+```json
+{
+  "pdf_page": 27,
+  "sheet_number": "S1-20A",
+  "sheet_title": "SECOND FLOOR FRAMING PLAN - SEGMENT A",
+  "revision": null,
+  "confidence": 1.0,
+  "layout_id": "layout-1",
+  "number_x": 2839.68,
+  "number_y": -2138.76,
+  "warnings": []
+}
+```
+
+Example reconciliation record:
+
+```json
+{
+  "declared_sheet_number": "S1-20A",
+  "actual_pdf_pages": [27],
+  "actual_sheet_number": "S1-20A",
+  "status": "MATCH",
+  "title_similarity": 1.0,
+  "confidence": 1.0,
+  "warnings": []
+}
+```
+
 ## Tests
 
 Run the ShopLens unit tests without drawings:
@@ -279,9 +366,12 @@ cargo build --release
   so reliable normalized top-left coordinates cannot yet be calculated.
 - ShopLens detects label text and location, but still does not know which label
   belongs to which beam or other drawn member.
-- Sheet List extraction requires native positioned text and recognizable column
-  headers. It does not read image-only tables, infer missing column positions,
-  classify sheets, or verify declared entries against actual title blocks.
+- Sheet List and title-block extraction require native positioned text. They do
+  not read image-only tables, infer missing Sheet List columns, or classify sheets.
+- Title-block extraction learns layouts only from the current PDF. Packages with
+  fewer than two confidently labeled pages, unusually fragmented labels, or titles
+  outside the nearby title region may remain low-confidence. Revision extraction
+  is intentionally conservative.
 - Continuation without repeated headers is limited to the page immediately
   following a confirmed list page inside the selected range. Complex wrapped
   multi-line titles may require future row-continuation logic.
