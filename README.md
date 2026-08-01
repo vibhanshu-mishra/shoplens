@@ -9,6 +9,14 @@ Fast Rust library for PDF classification and text extraction. Detects whether a 
 
 Built by [Firecrawl](https://firecrawl.dev) to handle text-based PDFs locally in under 200ms, skipping expensive OCR services for the ~54% of PDFs that don't need them.
 
+## ShopLens
+
+This repository also contains the first ShopLens milestone: a separate Python
+layer that finds and normalizes structural-steel section labels in positioned
+PDF text. See [SHOPLENS.md](SHOPLENS.md) for macOS setup, CLI usage, JSON output,
+tests, and current limitations. ShopLens builds on Firecrawl's `pdf-inspector`;
+the upstream parser, attribution, and license are preserved.
+
 ## Features
 
 - **Smart classification** — Detect TextBased, Scanned, ImageBased, or Mixed PDFs in ~10-50ms by sampling content streams. Returns a confidence score (0.0-1.0) and per-page OCR routing.
