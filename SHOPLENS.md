@@ -1,4 +1,4 @@
-# ShopLens steel-section extractor (first milestone)
+# ShopLens steel-section extraction and diagnostics
 
 ShopLens builds on Firecrawl's open-source `pdf-inspector` and keeps its
 construction-specific code in the separate `shoplens/` Python package. The
@@ -6,7 +6,7 @@ original attribution and MIT license remain unchanged.
 
 ## What it does
 
-This milestone reads a local native-text PDF, uses `pdf-inspector` to extract
+ShopLens reads a local native-text PDF, uses `pdf-inspector` to extract
 positioned text, and detects common W-shapes, HSS, channels, angles, double
 angles, and plates. Formatting variants such as `W18 x 35` and `W18×35` are
 normalized to `W18X35`.
@@ -16,7 +16,9 @@ family, 1-based PDF page number, bounding box (`x`, `y`, `width`, `height` in
 PDF points), and confidence. Coordinates use the PDF convention: the origin is
 at the bottom-left of the page.
 
-It does **not** compare drawings, perform OCR, recognize grids or beam lines,
+It also provides extraction diagnostics, duplicate-aware summaries, filters,
+and installation checks. It does **not** compare drawings, perform OCR,
+recognize grids or beam lines,
 join labels split across text items, or use AI/external services.
 
 ## Repository and parser API
@@ -37,7 +39,8 @@ items = pdf_inspector.extract_text_with_positions("drawing.pdf")
 
 It returns `pdf_inspector.TextItem` objects. Each exposes `text`, `x`, `y`,
 `width`, `height`, `font`, `font_size`, `page`, style flags, and `item_type`.
-The page value is 1-based; `x` and `y` are PDF points measured from the
+The source `page` value is already 1-based; ShopLens preserves it as the
+human-readable page number. `x` and `y` are raw PDF points measured from the
 bottom-left. The same API also has a bytes variant and an optional page filter.
 Other public functions return plain text, Markdown, document classification, or
 text within caller-supplied regions, but positioned extraction is the correct
@@ -66,46 +69,72 @@ The final command compiles the Rust `pdf-inspector` extension and installs it
 into the active virtual environment. ShopLens imports that extension directly;
 the Rust parser is not copied or rewritten.
 
-## Run ShopLens
-
-Readable Terminal output:
+## Check the installation
 
 ```bash
-python -m shoplens.cli inspect path/to/drawing.pdf
+python -m shoplens.cli doctor
+python -m shoplens.cli doctor drawing.pdf
 ```
 
-Example:
+The first command checks Python, both imports, the native module location, and
+the positioned-text function. Supplying a PDF also checks that the path exists,
+that `pdf-inspector` can open it, and that positioned text is returned. Cargo is
+not required when a working Python extension is already installed.
 
-```text
-Page 3 | W18X35 | family=W | x=124.50 | y=388.20
-```
+## Inspect steel labels
 
-Complete JSON output:
+The default output is a summary so a large drawing does not flood Terminal:
 
 ```bash
-python -m shoplens.cli inspect path/to/drawing.pdf --json
+python -m shoplens.cli inspect drawing.pdf
 ```
 
-```json
-[
-  {
-    "page_number": 3,
-    "original_text": "W18 x 35",
-    "normalized_text": "W18X35",
-    "section_family": "W",
-    "x": 124.5,
-    "y": 388.2,
-    "width": 47.1,
-    "height": 9.0,
-    "confidence": 1.0
-  }
-]
+Add `--list` to print individual deduplicated records:
+
+```bash
+python -m shoplens.cli inspect drawing.pdf --list
+python -m shoplens.cli inspect drawing.pdf --raw --list
 ```
 
-An empty JSON list means text was extracted but no supported labels were found.
-The readable mode says this explicitly. Missing files, non-PDF filenames,
-unreadable PDFs, PDFs with no extractable text, and an unbuilt extension produce
-plain-English error messages.
+`--raw` selects every accepted source detection, including duplicate PDF text
+objects. Without `--raw`, records are deduplicated only when page, normalized
+section, coordinates, width, and height match within 0.25 PDF points. A retained
+record reports `duplicate_count`. Two `W24X62` labels at different drawing
+locations remain distinct.
+
+Summary JSON clearly identifies `record_mode` as `raw` or `deduplicated`:
+
+```bash
+python -m shoplens.cli inspect drawing.pdf --json
+python -m shoplens.cli inspect drawing.pdf --json --list
+```
+
+The summary includes raw/displayed totals, unique values, counts by family and
+page, pages containing detections, the ten most frequent values, duplicates,
+negative coordinates, and rejected likely false positives. Filters work with
+readable and JSON output and can be combined:
+
+```bash
+python -m shoplens.cli inspect drawing.pdf --page 39 --family W --contains W18
+```
+
+## Diagnose extracted text
+
+`debug-text` displays every source positioned-text item, including its source
+page, human-readable page, text, raw box, font metadata, candidate/match flags,
+accepted section data, and practical rejection reasons.
+
+```bash
+python -m shoplens.cli debug-text drawing.pdf
+python -m shoplens.cli debug-text drawing.pdf --json
+python -m shoplens.cli debug-text drawing.pdf --page 39
+python -m shoplens.cli debug-text drawing.pdf --contains W18
+python -m shoplens.cli debug-text drawing.pdf --family HSS --matches-only
+python -m shoplens.cli debug-text drawing.pdf --candidates-only
+```
+
+Family options may be repeated. `--page` always means the visible one-based PDF
+page number.
 
 ## Tests
 
@@ -141,3 +170,17 @@ cargo build --release
   retains the extractor's exact box.
 - Supported syntax is intentionally conservative to avoid confusing scales,
   dates, sheet numbers, dimensions, and grid labels with steel sections.
+- W-shapes require a whole-number nominal depth, while decimal weights such as
+  `W6X8.5` remain valid. Notation such as `W2.9XW2.9` or extraction variants
+  missing the second W, such as `W2.9X2.9`, are excluded from structural steel
+  results and diagnosed as `WELDED_WIRE_REINFORCEMENT`. This is only a
+  diagnostic exclusion; reinforcement extraction will be a separate future
+  capability. W-shape checking remains syntax-based rather than a complete
+  AISC catalog validation.
+- Raw PDF coordinates may legitimately be negative because of page rotation,
+  crop boxes, transformed CAD content, or shifted drawing origins. ShopLens
+  preserves them exactly and never applies `abs()`. The public positioned-text
+  API does not expose page width, page height, rotation, media box, or crop box,
+  so reliable normalized top-left coordinates cannot yet be calculated.
+- ShopLens detects label text and location, but still does not know which label
+  belongs to which beam or other drawn member.
