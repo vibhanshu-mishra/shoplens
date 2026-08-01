@@ -4,6 +4,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
+from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 
 from .models import SheetEntry, SheetListResult
@@ -17,8 +18,10 @@ SHEET_NUMBER_RE = re.compile(
     r"^[A-Z]{1,3}-?\d{1,4}(?:-\d{1,3})?[A-Z]?$", re.IGNORECASE
 )
 FOOTER_RE = re.compile(r"\b(?:GRAND\s+TOTAL|TOTAL\s+SHEETS?|SHEET\s+COUNT)\b", re.IGNORECASE)
-ROW_Y_TOLERANCE = 2.5
+DECLARED_TOTAL_RE = re.compile(r"\bGRAND\s+TOTAL\s*:\s*(\d+)\b", re.IGNORECASE)
 BOX_TOLERANCE = 0.25
+MIN_CONTINUATION_ROWS = 5
+MIN_PRIMARY_ROWS = 1
 
 
 class PositionedText(Protocol):
@@ -40,6 +43,14 @@ class _Row:
         return sum(float(item.y) for item in self.items) / len(self.items)
 
     @property
+    def center_y(self) -> float:
+        return sum(float(item.y) + float(item.height) / 2.0 for item in self.items) / len(self.items)
+
+    @property
+    def typical_height(self) -> float:
+        return median(float(item.height) for item in self.items)
+
+    @property
     def text(self) -> str:
         return _join_items(self.items)
 
@@ -50,13 +61,17 @@ class _Layout:
     header_y: float
     number_header_x: float
     name_header_x: float
+    number_left: float
+    title_start_x: float
+    lower_y: float
+    row_spacing: float
 
 
 def is_sheet_number(value: str) -> bool:
     """Return whether text matches the configurable structural-sheet syntax."""
 
     compact = re.sub(r"\s+", "", value).upper()
-    return bool(SHEET_NUMBER_RE.fullmatch(compact)) and any(char.isdigit() for char in compact)
+    return bool(SHEET_NUMBER_RE.fullmatch(compact)) and sum(char.isdigit() for char in compact) >= 2
 
 
 def normalize_sheet_name(value: str) -> str:
@@ -91,6 +106,7 @@ def extract_sheet_list(
     list_pages: List[int] = []
     previous_layout: Optional[_Layout] = None
     previous_list_page: Optional[int] = None
+    declared_totals: List[int] = []
 
     if source_duplicate_count:
         warnings.append(f"EXACT_DUPLICATE_TEXT_ITEMS_SUPPRESSED: {source_duplicate_count}")
@@ -99,6 +115,7 @@ def extract_sheet_list(
         rows = _group_rows(by_page.get(page, []))
         headings = [row for row in rows if _heading_name(row.text) is not None]
         header = _find_header_layout(rows)
+        page_total = _declared_total(rows)
         debug.append(
             {
                 "page": page,
@@ -107,13 +124,18 @@ def extract_sheet_list(
                 "column_boundary_x": header.boundary_x if header else None,
                 "number_header_x": header.number_header_x if header else None,
                 "name_header_x": header.name_header_x if header else None,
+                "number_column_left": header.number_left if header else None,
+                "title_column_start": header.title_start_x if header else None,
+                "table_lower_y": header.lower_y if header else None,
+                "inferred_row_spacing": header.row_spacing if header else None,
+                "declared_total": page_total,
                 "row_y_positions": [row.y for row in rows],
                 "rejected_rows": [],
             }
         )
 
         layout = header
-        explicit_list_evidence = bool(headings or header)
+        primary_evidence = bool(headings and header)
         may_continue = (
             previous_layout is not None
             and previous_list_page is not None
@@ -127,17 +149,30 @@ def extract_sheet_list(
             continue
 
         page_entries, page_warnings, rejected = _extract_page_rows(
-            rows, layout, continuation=not explicit_list_evidence
+            rows, layout, continuation=not primary_evidence
         )
         debug[-1]["rejected_rows"] = rejected
-        if not explicit_list_evidence and not page_entries:
+        debug[-1]["valid_row_pairs"] = len(page_entries)
+        continuation_ok = (
+            may_continue
+            and len(page_entries) >= MIN_CONTINUATION_ROWS
+            and _spacing_matches(page_entries, previous_layout)
+        )
+        primary_ok = primary_evidence and len(page_entries) >= MIN_PRIMARY_ROWS
+        if not primary_ok and not continuation_ok:
+            debug[-1]["page_rejection_reason"] = (
+                "INSUFFICIENT_PRIMARY_EVIDENCE"
+                if headings or header
+                else "INSUFFICIENT_CONTINUATION_EVIDENCE"
+            )
             continue
-        if explicit_list_evidence or page_entries:
-            list_pages.append(page)
-            previous_layout = layout
-            previous_list_page = page
-            entries.extend(page_entries)
-            warnings.extend(page_warnings)
+        list_pages.append(page)
+        previous_layout = layout
+        previous_list_page = page
+        entries.extend(page_entries)
+        warnings.extend(page_warnings)
+        if page_total is not None:
+            declared_totals.append(page_total)
 
     entries, duplicate_row_count = _deduplicate_entries(entries)
     if duplicate_row_count:
@@ -148,6 +183,14 @@ def extract_sheet_list(
         warnings.append("NO_NATIVE_TEXT_SHEET_LIST_FOUND")
     elif len(entries) < 2:
         warnings.append("SUSPICIOUSLY_LOW_ENTRY_COUNT")
+    declared_total = declared_totals[0] if declared_totals else None
+    if len(set(declared_totals)) > 1:
+        warnings.append("CONFLICTING_DECLARED_TOTALS")
+    unique_entry_count = len({entry.sheet_number for entry in entries})
+    if declared_total is not None and declared_total != unique_entry_count:
+        warnings.append(
+            f"DECLARED_TOTAL_MISMATCH: declared={declared_total} extracted_unique={unique_entry_count}"
+        )
 
     return SheetListResult(
         source_file=str(Path(source_file)),
@@ -156,21 +199,34 @@ def extract_sheet_list(
         entries=entries,
         duplicate_sheet_numbers=duplicate_numbers,
         warnings=_unique(warnings),
+        declared_total=declared_total,
         debug=debug,
     )
 
 
 def _group_rows(items: Iterable[PositionedText]) -> List[_Row]:
     rows: List[_Row] = []
-    for item in sorted(items, key=lambda value: (-float(value.y), float(value.x))):
-        row = next((candidate for candidate in rows if abs(candidate.y - float(item.y)) <= ROW_Y_TOLERANCE), None)
+    for item in sorted(
+        items,
+        key=lambda value: (-(float(value.y) + float(value.height) / 2.0), float(value.x)),
+    ):
+        item_center = float(item.y) + float(item.height) / 2.0
+        row = next(
+            (
+                candidate
+                for candidate in rows
+                if abs(candidate.center_y - item_center)
+                <= max(1.25, 0.45 * min(candidate.typical_height, float(item.height)))
+            ),
+            None,
+        )
         if row is None:
             rows.append(_Row(page=int(item.page), items=[item]))
         else:
             row.items.append(item)
     for row in rows:
         row.items.sort(key=lambda value: float(value.x))
-    return sorted(rows, key=lambda value: -value.y)
+    return sorted(rows, key=lambda value: -value.center_y)
 
 
 def _heading_name(text: str) -> Optional[str]:
@@ -200,13 +256,72 @@ def _find_header_layout(rows: Sequence[_Row]) -> Optional[_Layout]:
         name_x = min(float(item.x) for item in name_items)
         if name_x <= number_x:
             continue
-        number_center = sum(_center_x(item) for item in number_items) / len(number_items)
-        name_center = sum(_center_x(item) for item in name_items) / len(name_items)
+        footer_rows = [candidate for candidate in rows if _row_has_footer(candidate)]
+        footer_y = max(
+            (candidate.y for candidate in footer_rows if candidate.y < row.y),
+            default=float("-inf"),
+        )
+        possible_rows = [
+            candidate
+            for candidate in rows
+            if candidate.y < row.y and candidate.y > footer_y
+        ]
+        numbered: List[Tuple[_Row, PositionedText]] = []
+        for candidate in possible_rows:
+            for item in candidate.items:
+                if is_sheet_number(item.text) and float(item.x) < name_x:
+                    numbered.append((candidate, item))
+        if numbered:
+            number_anchor = _dominant_coordinate(
+                [float(item.x) for _, item in numbered],
+                tolerance=max(2.0, row.typical_height),
+            )
+            aligned = [
+                (candidate, item)
+                for candidate, item in numbered
+                if abs(float(item.x) - number_anchor) <= max(2.0, row.typical_height)
+            ]
+        else:
+            number_anchor = number_x
+            aligned = []
+        title_starts: List[float] = []
+        for candidate, number_item in aligned:
+            following = [
+                item
+                for item in candidate.items
+                if float(item.x) >= float(number_item.x) + float(number_item.width)
+            ]
+            if following:
+                title_starts.append(min(float(item.x) for item in following))
+        title_start = (
+            _dominant_coordinate(title_starts, tolerance=max(2.0, row.typical_height))
+            if title_starts
+            else name_x
+        )
+        number_rights = [float(item.x) + float(item.width) for _, item in aligned]
+        number_right = max(number_rights) if number_rights else max(
+            float(item.x) + float(item.width) for item in number_items
+        )
+        boundary = (number_right + title_start) / 2.0
+        aligned_ys = sorted({candidate.center_y for candidate, _ in aligned}, reverse=True)
+        spacings = [
+            aligned_ys[index] - aligned_ys[index + 1]
+            for index in range(len(aligned_ys) - 1)
+            if aligned_ys[index] > aligned_ys[index + 1]
+        ]
+        row_spacing = median(spacings) if spacings else row.typical_height * 1.35
+        lower_y = footer_y if footer_y != float("-inf") else (
+            min(aligned_ys) - row_spacing * 0.75 if aligned_ys else row.y - row_spacing
+        )
         return _Layout(
-            boundary_x=(number_center + name_center) / 2.0,
+            boundary_x=boundary,
             header_y=row.y,
             number_header_x=number_x,
             name_header_x=name_x,
+            number_left=number_anchor - max(row.typical_height * 2.0, 4.0),
+            title_start_x=title_start,
+            lower_y=lower_y,
+            row_spacing=row_spacing,
         )
     return None
 
@@ -217,23 +332,27 @@ def _extract_page_rows(
     entries: List[SheetEntry] = []
     warnings: List[str] = []
     rejected: List[Dict[str, Any]] = []
+    invalid_row_count = 0
     for row in rows:
-        if _heading_name(row.text) or _is_header_row(row) or FOOTER_RE.search(row.text):
-            reason = "HEADING_OR_HEADER" if not FOOTER_RE.search(row.text) else "FOOTER_ROW"
+        if _heading_name(row.text) or _is_header_row(row) or _row_has_footer(row):
+            reason = "HEADING_OR_HEADER" if not _row_has_footer(row) else "FOOTER_ROW"
             rejected.append({"y": row.y, "text": row.text, "reason": reason})
             continue
-        if not continuation and row.y >= layout.header_y - ROW_Y_TOLERANCE:
+        if row.center_y >= layout.header_y or row.center_y <= layout.lower_y:
             continue
-        number_items = [item for item in row.items if _center_x(item) < layout.boundary_x]
-        name_items = [item for item in row.items if _center_x(item) >= layout.boundary_x]
+        number_items = [
+            item
+            for item in row.items
+            if float(item.x) >= layout.number_left and _center_x(item) < layout.boundary_x
+        ]
+        name_items = _title_items(row.items, layout)
         number_original = _join_items(number_items)
         number = re.sub(r"\s+", "", number_original).upper()
         name_original = _join_items(name_items)
         name = normalize_sheet_name(name_original)
-        if not is_sheet_number(number):
+        if not is_sheet_number(number) or _looks_like_equipment_tag(number, name):
             if name and len(name) >= 3:
-                warning = f"ROW_WITHOUT_VALID_SHEET_NUMBER_PAGE_{row.page}_Y_{row.y:.2f}"
-                warnings.append(warning)
+                invalid_row_count += 1
                 rejected.append({"y": row.y, "text": row.text, "reason": "INVALID_SHEET_NUMBER"})
             continue
         entry_warnings: List[str] = []
@@ -264,7 +383,95 @@ def _extract_page_rows(
                 name_comparison_text=sheet_name_comparison(name),
             )
         )
+    if invalid_row_count:
+        warnings.append(f"ROWS_WITHOUT_VALID_SHEET_NUMBER: {invalid_row_count}")
     return entries, warnings, rejected
+
+
+def _title_items(items: Sequence[PositionedText], layout: _Layout) -> List[PositionedText]:
+    ordered = sorted(
+        (item for item in items if _center_x(item) >= layout.boundary_x),
+        key=lambda item: float(item.x),
+    )
+    if not ordered:
+        return []
+    tolerance = max(2.0, median(float(item.height) for item in ordered) * 2.0)
+    start_index = next(
+        (
+            index
+            for index, item in enumerate(ordered)
+            if abs(float(item.x) - layout.title_start_x) <= tolerance
+        ),
+        None,
+    )
+    if start_index is None:
+        return []
+    selected = [ordered[start_index]]
+    for item in ordered[start_index + 1 :]:
+        previous = selected[-1]
+        gap = float(item.x) - (float(previous.x) + float(previous.width))
+        allowed_gap = max(4.0, 6.0 * min(float(previous.height), float(item.height)))
+        if gap > allowed_gap:
+            break
+        selected.append(item)
+    return selected
+
+
+def _looks_like_equipment_tag(number: str, name: str) -> bool:
+    if not number.startswith("RTU"):
+        return False
+    return bool(
+        re.search(r"\bROOF\s+TOP\s+UNIT\b", name, re.IGNORECASE)
+        or re.fullmatch(r"[\d,.'\"\s-]+", name)
+    )
+
+
+def _declared_total(rows: Sequence[_Row]) -> Optional[int]:
+    for row in rows:
+        for item in row.items:
+            match = DECLARED_TOTAL_RE.search(item.text)
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def _row_has_footer(row: _Row) -> bool:
+    return any(FOOTER_RE.search(item.text) for item in row.items)
+
+
+def _spacing_matches(entries: Sequence[SheetEntry], layout: Optional[_Layout]) -> bool:
+    if layout is None or len(entries) < MIN_CONTINUATION_ROWS:
+        return False
+    centers = sorted(
+        {entry.number_y + entry.number_height / 2.0 for entry in entries},
+        reverse=True,
+    )
+    spacings = [
+        centers[index] - centers[index + 1]
+        for index in range(len(centers) - 1)
+        if centers[index] > centers[index + 1]
+    ]
+    if not spacings:
+        return False
+    observed = median(spacings)
+    return layout.row_spacing * 0.65 <= observed <= layout.row_spacing * 1.5
+
+
+def _dominant_coordinate(values: Sequence[float], tolerance: float) -> float:
+    if not values:
+        raise ValueError("at least one coordinate is required")
+    groups: List[List[float]] = []
+    for value in sorted(values):
+        group = next(
+            (candidate for candidate in groups if abs(median(candidate) - value) <= tolerance),
+            None,
+        )
+        if group is None:
+            groups.append([value])
+        else:
+            group.append(value)
+    largest = max(groups, key=len)
+    return float(median(largest))
 
 
 def _deduplicate_items(items: Sequence[PositionedText]) -> Tuple[List[PositionedText], int]:
@@ -344,7 +551,21 @@ def sheet_prefix_counts(entries: Sequence[SheetEntry]) -> Dict[str, int]:
 
 
 def _join_items(items: Sequence[PositionedText]) -> str:
-    return normalize_sheet_name(" ".join(item.text.strip() for item in sorted(items, key=lambda value: float(value.x)) if item.text.strip()))
+    ordered = sorted(
+        (item for item in items if item.text.strip()),
+        key=lambda value: float(value.x),
+    )
+    if not ordered:
+        return ""
+    combined = ordered[0].text.strip()
+    previous = ordered[0]
+    for item in ordered[1:]:
+        explicit_space = previous.text[-1:].isspace() or item.text[:1].isspace()
+        overlaps = float(item.x) < float(previous.x) + float(previous.width)
+        separator = " " if explicit_space or overlaps else ""
+        combined += separator + item.text.strip()
+        previous = item
+    return normalize_sheet_name(combined)
 
 
 def _clean(value: str) -> str:

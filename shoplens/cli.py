@@ -234,6 +234,8 @@ def _run_sheet_list(args: argparse.Namespace) -> int:
     else:
         print("No extractable native-text Sheet List was found in the selected pages.")
     print(f"{len(result.entries)} sheet entries extracted")
+    if result.declared_total is not None:
+        print(f"Declared total: {result.declared_total}")
     print("\nPrefix summary:")
     prefix_counts = sheet_prefix_counts(result.entries)
     if prefix_counts:

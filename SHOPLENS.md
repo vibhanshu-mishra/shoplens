@@ -206,7 +206,8 @@ The JSON result has this overall shape:
     }
   ],
   "duplicate_sheet_numbers": [],
-  "warnings": []
+  "warnings": [],
+  "declared_total": 92
 }
 ```
 
@@ -225,6 +226,10 @@ reported. Repeated sheet numbers at different locations remain in the result.
 Identical titles receive `DUPLICATE_SHEET_NUMBER`; differing titles receive
 `CONFLICTING_SHEET_TITLES`. Missing names, invalid row candidates, suspiciously
 small results, missing column headers, and footer rows are also diagnosed.
+When a `Grand total` footer is present, JSON exposes it as `declared_total` and
+ShopLens reports `DECLARED_TOTAL_MISMATCH` if it differs from the unique entry
+count. Invalid-row details remain in `--debug`; normal output uses an aggregated
+warning count.
 
 ## Tests
 

@@ -53,7 +53,7 @@ class SheetNumberTests(unittest.TestCase):
                 self.assertTrue(is_sheet_number(value))
 
     def test_invalid_row_text(self):
-        for value in ("GRAND TOTAL", "92", "SECOND FLOOR", "1/8=1-0"):
+        for value in ("S0", "GRAND TOTAL", "92", "SECOND FLOOR", "1/8=1-0"):
             with self.subTest(value=value):
                 self.assertFalse(is_sheet_number(value))
 
@@ -63,6 +63,56 @@ class SheetNumberTests(unittest.TestCase):
 
 
 class SheetListExtractionTests(unittest.TestCase):
+    def test_table_region_excludes_surrounding_text_and_next_page(self):
+        items = [Item("RTU01", 1, 100, 950), Item("ROOF TOP UNIT", 1, 400, 950)]
+        items += headers()
+        items += row("S0-00", "GENERAL NOTES", 800)
+        items += row("S1-20A", "FRAMING PLAN A", 786)
+        items += [Item("Grand total: 2", 1, 100, 770, 100)]
+        items += row("S5-00", "OUTSIDE TABLE", 750)
+        items += [Item("RTU12", 2, 100, 800), Item("6,968", 2, 400, 800)]
+        items += row("S1-20B", "ISOLATED SHEET REFERENCE", 786, page=2)
+        result = extract_sheet_list(items, "drawing.pdf", [1, 2])
+        self.assertEqual(result.sheet_list_pages, [1])
+        self.assertEqual([entry.sheet_number for entry in result.entries], ["S0-00", "S1-20A"])
+        self.assertFalse(any(entry.sheet_number.startswith("RTU") for entry in result.entries))
+        self.assertFalse(any("ROWS_WITHOUT_VALID" in warning for warning in result.warnings))
+
+    def test_standalone_s0_and_equipment_tag_rejected_inside_region(self):
+        items = headers()
+        items += row("S0-00", "GENERAL NOTES", 800)
+        items += row("S0", "INCOMPLETE", 786)
+        items += row("RTU01", "ROOF TOP UNIT 6,198", 772)
+        items += [Item("Grand total: 1", 1, 100, 758, 100)]
+        result = extract_sheet_list(items, "drawing.pdf", [1])
+        self.assertEqual([entry.sheet_number for entry in result.entries], ["S0-00"])
+        self.assertEqual(result.declared_total, 1)
+        self.assertIn("ROWS_WITHOUT_VALID_SHEET_NUMBER: 2", result.warnings)
+
+    def test_grand_total_mismatch(self):
+        items = headers() + row("S0-00", "GENERAL NOTES", 800)
+        items += row("S1-20", "FRAMING PLAN", 786)
+        items += [Item("Grand total: 92", 1, 100, 770, 100)]
+        result = extract_sheet_list(items, "drawing.pdf", [1])
+        self.assertEqual(result.declared_total, 92)
+        self.assertTrue(any(warning.startswith("DECLARED_TOTAL_MISMATCH") for warning in result.warnings))
+
+    def test_close_adjacent_rows_remain_separate(self):
+        items = headers()
+        items += [Item("S0-00", 1, 100, 800, 80, 6), Item("NOTES", 1, 400, 801, 100, 6)]
+        items += [Item("S0-01", 1, 100, 792, 80, 6), Item("NOTES", 1, 400, 793, 100, 6)]
+        result = extract_sheet_list(items, "drawing.pdf", [1])
+        self.assertEqual([entry.sheet_number for entry in result.entries], ["S0-00", "S0-01"])
+
+    def test_split_word_fragments_join_without_invented_space(self):
+        items = headers() + [
+            Item("S5-00", 1, 100, 800, 80),
+            Item("BASE PLATE SC", 1, 400, 800, 100),
+            Item("HEDULE", 1, 520, 800, 60),
+        ]
+        result = extract_sheet_list(items, "drawing.pdf", [1])
+        self.assertEqual(result.entries[0].sheet_name, "BASE PLATE SCHEDULE")
+
     def test_alternate_heading_and_column_headers(self):
         items = [
             Item("drawing list", 1, 100, 900, 100),
@@ -89,15 +139,24 @@ class SheetListExtractionTests(unittest.TestCase):
         self.assertEqual(result.entries[0].number_x, 375.0)
 
     def test_continuation_page_with_and_without_repeated_headers(self):
-        first = headers(page=1) + row("S0-00", "GENERAL NOTES", 800, page=1)
-        continued = row("S1-20A", "FRAMING PLAN", 800, page=2)
+        first = headers(page=1)
+        for index in range(5):
+            first += row(f"S0-0{index}", "GENERAL NOTES", 800 - index * 13.5, page=1)
+        continued = []
+        for index, suffix in enumerate(("A", "B", "D", "H", "M")):
+            continued += row(
+                f"S1-20{suffix}",
+                f"FRAMING PLAN {suffix}",
+                800 - index * 13.5,
+                page=2,
+            )
         result = extract_sheet_list(first + continued, "drawing.pdf", [1, 2])
         self.assertEqual(result.sheet_list_pages, [1, 2])
-        self.assertEqual([entry.source_page for entry in result.entries], [1, 2])
+        self.assertEqual([entry.source_page for entry in result.entries], [1] * 5 + [2] * 5)
 
         repeated = headers(page=2) + row("S1-20B", "FRAMING PLAN B", 800, page=2)
         repeated_result = extract_sheet_list(first + repeated, "drawing.pdf", [1, 2])
-        self.assertEqual(len(repeated_result.entries), 2)
+        self.assertEqual(len(repeated_result.entries), 6)
 
     def test_duplicate_text_objects_are_suppressed(self):
         base = headers() + row("S0-00", "GENERAL NOTES", 800)
@@ -128,7 +187,7 @@ class SheetListExtractionTests(unittest.TestCase):
         result = extract_sheet_list(items, "drawing.pdf", [1])
         self.assertEqual(len(result.entries), 1)
         self.assertIn("MISSING_SHEET_NAME", result.entries[0].warnings)
-        self.assertTrue(any("ROW_WITHOUT_VALID_SHEET_NUMBER" in item for item in result.warnings))
+        self.assertTrue(any("ROWS_WITHOUT_VALID_SHEET_NUMBER" in item for item in result.warnings))
         self.assertFalse(any(entry.sheet_number == "92" for entry in result.entries))
 
     def test_negative_coordinates_are_preserved(self):
