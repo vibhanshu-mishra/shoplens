@@ -25,6 +25,8 @@ class NormalizationTests(unittest.TestCase):
             "W18 x 35": ("W18X35", SectionFamily.W),
             "W18×35": ("W18X35", SectionFamily.W),
             "w 18 X 35": ("W18X35", SectionFamily.W),
+            "W6X8.5": ("W6X8.5", SectionFamily.W),
+            "W44X335": ("W44X335", SectionFamily.W),
             "HSS 8 x 8 x 3/8": ("HSS8X8X3/8", SectionFamily.HSS),
             "C12X20.7": ("C12X20.7", SectionFamily.C),
             "L4X4X3/8": ("L4X4X3/8", SectionFamily.L),
@@ -39,6 +41,12 @@ class NormalizationTests(unittest.TestCase):
         for value in ("Scale: 1/8 = 1'-0", "Sheet S2.01", "March 18, 2026", "Grid W"):
             with self.subTest(value=value):
                 self.assertEqual(normalize_steel_label(value), (value, SectionFamily.UNKNOWN))
+
+    def test_implausible_decimal_w_depth_is_unchanged(self):
+        self.assertEqual(
+            normalize_steel_label("W2.9X2.9"),
+            ("W2.9X2.9", SectionFamily.UNKNOWN),
+        )
 
 
 class DetectionTests(unittest.TestCase):
