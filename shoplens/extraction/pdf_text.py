@@ -8,6 +8,19 @@ class PdfInspectorUnavailableError(RuntimeError):
     """Raised when the native pdf-inspector Python extension cannot be loaded."""
 
 
+def get_pdf_page_count(path: Union[str, Path]) -> int:
+    """Return the real PDF page count using pdf-inspector classification."""
+
+    try:
+        import pdf_inspector
+    except ImportError as exc:
+        raise PdfInspectorUnavailableError(
+            "The pdf-inspector Python extension is not installed. Rebuild this repository "
+            "with `python -m maturin develop --release`."
+        ) from exc
+    return int(pdf_inspector.classify_pdf(str(path)).page_count)
+
+
 def extract_positioned_text(
     path: Union[str, Path], pages: Optional[Sequence[int]] = None
 ) -> List[Any]:

@@ -1,7 +1,7 @@
 """Typed models for declared drawing Sheet Lists."""
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,7 @@ class SheetListResult:
     entries: List[SheetEntry]
     duplicate_sheet_numbers: List[str]
     warnings: List[str]
+    declared_total: Optional[int] = None
     debug: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self, include_debug: bool = False) -> Dict[str, Any]:
