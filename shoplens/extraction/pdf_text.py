@@ -1,14 +1,16 @@
 """Thin adapter around pdf-inspector's positioned-text Python API."""
 
 from pathlib import Path
-from typing import Any, List, Union
+from typing import Any, List, Optional, Sequence, Union
 
 
 class PdfInspectorUnavailableError(RuntimeError):
     """Raised when the native pdf-inspector Python extension cannot be loaded."""
 
 
-def extract_positioned_text(path: Union[str, Path]) -> List[Any]:
+def extract_positioned_text(
+    path: Union[str, Path], pages: Optional[Sequence[int]] = None
+) -> List[Any]:
     """Extract 1-based page numbers and PDF-point bounding boxes from a PDF."""
 
     try:
@@ -21,7 +23,8 @@ def extract_positioned_text(path: Union[str, Path]) -> List[Any]:
         ) from exc
 
     try:
-        return list(pdf_inspector.extract_text_with_positions(str(path)))
+        page_filter = list(pages) if pages is not None else None
+        return list(pdf_inspector.extract_text_with_positions(str(path), pages=page_filter))
     except (AttributeError, ImportError) as exc:
         raise PdfInspectorUnavailableError(
             "The installed pdf-inspector extension does not provide positioned text. "

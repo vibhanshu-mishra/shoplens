@@ -136,6 +136,96 @@ python -m shoplens.cli debug-text drawing.pdf --candidates-only
 Family options may be repeated. `--page` always means the visible one-based PDF
 page number.
 
+## Extract a declared Sheet List
+
+ShopLens can build a structured index from a native-text `SHEET LIST`,
+`DRAWING LIST`, `INDEX OF DRAWINGS`, or `SHEET INDEX` table. This is the
+architect's or engineer's declared index. ShopLens does not yet compare it with
+the title block printed on each actual drawing sheet.
+
+By default, only PDF pages 1–5 are parsed because drawing indexes are normally
+near the front of a package and large packages can contain hundreds of pages.
+Page ranges are human-readable and one-based:
+
+```bash
+python -m shoplens.cli sheet-list drawing.pdf
+python -m shoplens.cli sheet-list drawing.pdf --pages 1-5
+python -m shoplens.cli sheet-list drawing.pdf --pages 2-8
+```
+
+The normal output is a concise summary. Add `--list` for declared rows, use
+`--json` for every model field and raw bounding-box coordinate, or use `--debug`
+to see heading candidates, header candidates, inferred column boundaries, row
+Y positions, and rejected-row reasons:
+
+```bash
+python -m shoplens.cli sheet-list drawing.pdf --list
+python -m shoplens.cli sheet-list drawing.pdf --json
+python -m shoplens.cli sheet-list drawing.pdf --debug
+python -m shoplens.cli sheet-list drawing.pdf --json --debug
+```
+
+Example readable output:
+
+```text
+Sheet List found on PDF page(s): 3
+92 sheet entries extracted
+
+Prefix summary:
+S0: 10
+S1: 35
+
+S1-20A | SECOND FLOOR FRAMING PLAN - SEGMENT A | source page 3
+```
+
+The JSON result has this overall shape:
+
+```json
+{
+  "source_file": "drawing.pdf",
+  "pages_scanned": [1, 2, 3, 4, 5],
+  "sheet_list_pages": [3],
+  "entries": [
+    {
+      "sheet_number": "S1-20A",
+      "sheet_name": "SECOND FLOOR FRAMING PLAN - SEGMENT A",
+      "source_page": 3,
+      "number_original_text": "S1-20A",
+      "name_original_text": "SECOND FLOOR FRAMING PLAN - SEGMENT A",
+      "number_x": 100.0,
+      "number_y": 700.0,
+      "number_width": 60.0,
+      "number_height": 10.0,
+      "name_x": 400.0,
+      "name_y": 700.0,
+      "name_width": 280.0,
+      "name_height": 10.0,
+      "confidence": 0.95,
+      "warnings": [],
+      "name_comparison_text": "SECOND FLOOR FRAMING PLAN-SEGMENT A"
+    }
+  ],
+  "duplicate_sheet_numbers": [],
+  "warnings": []
+}
+```
+
+Supported number styles include `S0-00`, `S1-20A`, `S-101`, `S101A`,
+`SK-01`, and `SSK-001`. The configurable syntax requires an alphabetic prefix
+and digits; it intentionally excludes ordinary prose, dimensions, and totals.
+
+Column locations come from the `SHEET NUMBER`/`SHEET NAME` headers rather than
+fixed page coordinates. A confirmed list may continue onto the next selected
+page with repeated headers or with rows using the prior page's column layout.
+An unrelated two-column schedule is not treated as a continuation unless it
+immediately follows a confirmed list page and contains valid sheet rows.
+
+Exact overlapping PDF text objects and exact duplicate rows are suppressed and
+reported. Repeated sheet numbers at different locations remain in the result.
+Identical titles receive `DUPLICATE_SHEET_NUMBER`; differing titles receive
+`CONFLICTING_SHEET_TITLES`. Missing names, invalid row candidates, suspiciously
+small results, missing column headers, and footer rows are also diagnosed.
+
 ## Tests
 
 Run the ShopLens unit tests without drawings:
@@ -184,3 +274,9 @@ cargo build --release
   so reliable normalized top-left coordinates cannot yet be calculated.
 - ShopLens detects label text and location, but still does not know which label
   belongs to which beam or other drawn member.
+- Sheet List extraction requires native positioned text and recognizable column
+  headers. It does not read image-only tables, infer missing column positions,
+  classify sheets, or verify declared entries against actual title blocks.
+- Continuation without repeated headers is limited to the page immediately
+  following a confirmed list page inside the selected range. Complex wrapped
+  multi-line titles may require future row-continuation logic.
