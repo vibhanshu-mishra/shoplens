@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -15,6 +16,8 @@ from shoplens.reporting import (
     filter_detections,
     filter_diagnostics,
 )
+from shoplens.sheets import extract_sheet_list
+from shoplens.sheets.extract import sheet_prefix_counts
 from shoplens.steel.detect import analyze_positioned_text
 
 
@@ -58,7 +61,30 @@ def _parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="check the ShopLens installation")
     doctor_parser.add_argument("pdf", type=Path, nargs="?", help="optional PDF to test")
     doctor_parser.add_argument("--json", action="store_true", help="output structured JSON")
+
+    sheets_parser = subparsers.add_parser("sheet-list", help="extract the declared drawing Sheet List")
+    sheets_parser.add_argument("pdf", type=Path)
+    sheets_parser.add_argument(
+        "--pages",
+        type=_page_range,
+        default=list(range(1, 6)),
+        help="one-based page range (default: 1-5)",
+    )
+    sheets_parser.add_argument("--json", action="store_true", help="output all model fields as JSON")
+    sheets_parser.add_argument("--list", action="store_true", help="list individual sheet entries")
+    sheets_parser.add_argument("--debug", action="store_true", help="show table-detection evidence")
     return parser
+
+
+def _page_range(value: str) -> List[int]:
+    match = re.fullmatch(r"(\d+)(?:-(\d+))?", value.strip())
+    if match is None:
+        raise argparse.ArgumentTypeError("pages must look like 1-5 or 3")
+    start = int(match.group(1))
+    end = int(match.group(2) or start)
+    if start < 1 or end < start:
+        raise argparse.ArgumentTypeError("pages must be one-based and ascending")
+    return list(range(start, end + 1))
 
 
 def _families(values: Optional[Sequence[str]]) -> List[SectionFamily]:
@@ -75,20 +101,24 @@ def _validate_pdf(path: Path) -> Optional[str]:
     return None
 
 
-def _load_items(path: Path):
+def _load_items(
+    path: Path,
+    pages: Optional[Sequence[int]] = None,
+    allow_empty: bool = False,
+):
     error = _validate_pdf(path)
     if error:
         print(f"Error: {error}", file=sys.stderr)
         return None, 2
     try:
-        items = extract_positioned_text(path)
+        items = extract_positioned_text(path, pages=pages)
     except PdfInspectorUnavailableError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return None, 3
     except Exception as exc:
         print(f"Error: pdf-inspector could not read this PDF: {exc}", file=sys.stderr)
         return None, 4
-    if not items:
+    if not items and not allow_empty:
         print(
             "No extractable text was found. ShopLens currently supports native-text PDFs only; "
             "OCR is not included in this milestone.",
@@ -189,13 +219,58 @@ def _run_doctor(args: argparse.Namespace) -> int:
     return 0 if all(item.passed for item in checks) else 1
 
 
+def _run_sheet_list(args: argparse.Namespace) -> int:
+    items, status = _load_items(args.pdf, pages=args.pages, allow_empty=True)
+    if items is None:
+        return status
+    result = extract_sheet_list(items, str(args.pdf), args.pages)
+    if args.json:
+        print(json.dumps(result.to_dict(include_debug=args.debug), indent=2))
+        return 0
+
+    if result.sheet_list_pages:
+        pages = ", ".join(str(page) for page in result.sheet_list_pages)
+        print(f"Sheet List found on PDF page(s): {pages}")
+    else:
+        print("No extractable native-text Sheet List was found in the selected pages.")
+    print(f"{len(result.entries)} sheet entries extracted")
+    print("\nPrefix summary:")
+    prefix_counts = sheet_prefix_counts(result.entries)
+    if prefix_counts:
+        for prefix, count in prefix_counts.items():
+            print(f"{prefix}: {count}")
+    else:
+        print("None")
+    print("\nWarnings:")
+    if result.warnings:
+        for warning in result.warnings:
+            print(f"- {warning}")
+    else:
+        print("None")
+    if args.list:
+        print("\nDeclared sheet entries:")
+        for entry in result.entries:
+            warning = f" | warnings={','.join(entry.warnings)}" if entry.warnings else ""
+            print(
+                f"{entry.sheet_number} | {entry.sheet_name or '[missing name]'} | "
+                f"source page {entry.source_page}{warning}"
+            )
+    if args.debug:
+        print("\nDebug evidence:")
+        for page in result.debug:
+            print(json.dumps(page, sort_keys=True))
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "inspect":
         return _run_inspect(args)
     if args.command == "debug-text":
         return _run_debug_text(args)
-    return _run_doctor(args)
+    if args.command == "doctor":
+        return _run_doctor(args)
+    return _run_sheet_list(args)
 
 
 if __name__ == "__main__":
