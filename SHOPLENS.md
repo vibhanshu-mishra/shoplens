@@ -318,6 +318,97 @@ Example reconciliation record:
 }
 ```
 
+## Classify and index structural sheets
+
+`package-index` adds deterministic searchable metadata to reconciled sheets. It
+never replaces the sheet number, PDF page, declared title, or actual title. The
+actual title is preferred for classification; the declared title is a fallback,
+and a missing source remains `UNKNOWN` with a warning.
+
+The initial kind taxonomy is `GENERAL`, `NOTES`, `PLAN`, `ELEVATION`, `DETAIL`,
+`SECTION`, `SCHEDULE`, `DIAGRAM`, `VIEW`, `COVER`, and `UNKNOWN`. Explicit
+drawing-view forms such as `3D VIEW`, `ISOMETRIC VIEW`, `AXONOMETRIC VIEW`, and
+`PERSPECTIVE VIEW` use `VIEW`; a bare `VIEW` or a similar word such as `VIEWING`
+does not. The structural subject
+taxonomy covers general notes, loading, foundation plans/details, floor/roof/
+platform/stair framing, braced frames, wind bracing, connections, steel framing,
+steel columns, base plates, shear connections, platforms, stairs, other structural
+content, and unknown content. Mixed sheets keep one primary kind/subject plus
+secondary values; for example, sections-and-details uses `DETAIL` with secondary
+kind `SECTION`.
+
+Rules are declarative and deterministic. Exact or highly specific title patterns
+run before broader patterns, so `FOUNDATION PLAN` wins over generic foundation
+content and roof-framing details retain their roof subject. Equally specific rules
+with different assignments produce `MULTIPLE_PRIMARY_RULES` rather than relying on
+declaration order. Confidence is rule strength, not a statistical probability:
+approximately 0.98 is highly specific, 0.90–0.95 is strong, 0.80 is a broad safe
+fallback, below 0.70 is warned, and 0.00 is unknown.
+
+Levels are extracted only for explicit vertical context such as `FOUNDATION`,
+`SECOND FLOOR`, or `ROOF`. Named zones such as `MECHANICAL PLATFORM`, `OFFICE
+ROOF`, stair towers, and `SERVICE YARD` are areas. Segments come from `SEGMENT X`
+in the title; a matching sheet-number suffix is supporting evidence only, and a
+different suffix produces `SEGMENT_CONFLICT`. Controlled modifiers currently
+include `TYPICAL`, `OVERALL`, `ENLARGED`, and `PARTIAL`.
+
+Stable group keys combine useful metadata without replacing it, for example
+`FOUNDATION_PLAN:SEGMENT_A`, `FLOOR_FRAMING:SECOND_FLOOR:SEGMENT_A`,
+`CONNECTION:DOUBLE_ANGLE`, and `PLATFORM:DETAIL`.
+
+Run the real package on macOS from the repository directory:
+
+```bash
+python -m shoplens.cli package-index \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf"
+python -m shoplens.cli package-index \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --list
+python -m shoplens.cli package-index \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --json > /tmp/shoplens-package-index.json
+```
+
+Filters apply to both readable and JSON records:
+
+```bash
+python -m shoplens.cli package-index drawing.pdf --sheet S1-20A --debug
+python -m shoplens.cli package-index drawing.pdf --page 27
+python -m shoplens.cli package-index drawing.pdf --kind PLAN
+python -m shoplens.cli package-index drawing.pdf --subject FOUNDATION_PLAN
+python -m shoplens.cli package-index drawing.pdf --level "SECOND FLOOR"
+python -m shoplens.cli package-index drawing.pdf --segment A
+python -m shoplens.cli package-index drawing.pdf --area "MECHANICAL PLATFORM"
+python -m shoplens.cli package-index drawing.pdf --unknown-only --list
+```
+
+JSON preserves both original titles and includes stable enum values, rule ID,
+confidence, evidence, warnings, secondary taxonomy, group keys, package counts,
+and `classification_version`:
+
+```json
+{
+  "pdf_page": 27,
+  "sheet_number": "S1-20A",
+  "declared_title": "SECOND FLOOR FRAMING PLAN - SEGMENT A",
+  "actual_title": "SECOND FLOOR FRAMING PLAN - SEGMENT A",
+  "sheet_kind": "PLAN",
+  "subject": "FLOOR_FRAMING",
+  "level": "SECOND FLOOR",
+  "segment": "A",
+  "classification_confidence": 0.98,
+  "matched_rule": "SECOND_FLOOR_FRAMING_PLAN",
+  "warnings": []
+}
+```
+
+For example, `OVERALL 3D VIEW` classifies as kind `VIEW`, subject
+`OTHER_STRUCTURAL`, modifier `OVERALL`, using the stable `DRAWING_VIEW` rule.
+
+To add a safe rule, place a narrowly worded pattern in
+`shoplens/classification/rules.py`, give it a stable ID and a higher priority than
+any broader fallback it supersedes, then add synthetic positive, negative, and
+ambiguity tests. Do not add a rule solely to eliminate an unknown count.
+
 ## Tests
 
 Run the ShopLens unit tests without drawings:
@@ -372,6 +463,10 @@ cargo build --release
   fewer than two confidently labeled pages, unusually fragmented labels, or titles
   outside the nearby title region may remain low-confidence. Revision extraction
   is intentionally conservative.
+- Classification is title-based and does not inspect drawing geometry or content.
+  Unusual forms such as 3D views may remain unknown until a reusable taxonomy rule
+  is justified. A title that names multiple levels produces `LEVEL_CONFLICT`
+  instead of an arbitrary primary level.
 - Continuation without repeated headers is limited to the page immediately
   following a confirmed list page inside the selected range. Complex wrapped
   multi-line titles may require future row-continuation logic.
