@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from shoplens.doctor import run_doctor
+from shoplens.classification import (
+    SheetKind,
+    StructuralSubject,
+    build_package_index,
+    filter_sheets,
+)
 from shoplens.extraction import (
     PdfInspectorUnavailableError,
     extract_positioned_text,
@@ -128,6 +134,22 @@ def _parser() -> argparse.ArgumentParser:
     reconcile_parser.add_argument("--json", action="store_true", help="output all model fields as JSON")
     reconcile_parser.add_argument("--list", action="store_true", help="list reconciliation records")
     reconcile_parser.add_argument("--debug", action="store_true", help="show title-block candidate evidence")
+
+    index_parser = subparsers.add_parser(
+        "package-index", help="classify and index reconciled structural sheets"
+    )
+    index_parser.add_argument("pdf", type=Path)
+    index_parser.add_argument("--list", action="store_true", help="list classified sheets")
+    index_parser.add_argument("--json", action="store_true", help="output structured JSON")
+    index_parser.add_argument("--debug", action="store_true", help="explain considered classification rules")
+    index_parser.add_argument("--sheet", help="filter by sheet number")
+    index_parser.add_argument("--page", type=_one_based_page, help="filter by one-based PDF page")
+    index_parser.add_argument("--kind", choices=[value.value for value in SheetKind])
+    index_parser.add_argument("--subject", choices=[value.value for value in StructuralSubject])
+    index_parser.add_argument("--level", help="filter by normalized building level")
+    index_parser.add_argument("--segment", help="filter by segment identifier")
+    index_parser.add_argument("--area", help="filter by named physical area")
+    index_parser.add_argument("--unknown-only", action="store_true")
     return parser
 
 
@@ -438,6 +460,85 @@ def _run_reconcile_sheets(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_package_index(args: argparse.Namespace) -> int:
+    declared, actual, status = _extract_package_title_blocks(args.pdf)
+    if declared is None or actual is None:
+        return status
+    result = build_package_index(reconcile_sheets(declared, actual))
+    displayed = filter_sheets(
+        result.sheets,
+        sheet_number=args.sheet,
+        page=args.page,
+        kind=SheetKind(args.kind) if args.kind else None,
+        subject=StructuralSubject(args.subject) if args.subject else None,
+        level=args.level,
+        segment=args.segment,
+        area=args.area,
+        unknown_only=args.unknown_only,
+    )
+    if args.json:
+        payload = result.to_dict(include_debug=args.debug)
+        payload["sheets"] = [sheet.to_dict(include_debug=args.debug) for sheet in displayed]
+        payload["displayed_sheet_count"] = len(displayed)
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"Package: {args.pdf.name}")
+    print(f"Total indexed sheets: {result.indexed_sheet_count}")
+    print(f"Classified sheets: {result.classified_sheet_count}")
+    print(f"Unknown sheets: {result.unknown_sheet_count}")
+    _print_counts("By kind", result.counts_by_kind)
+    _print_counts("By subject", result.counts_by_subject)
+    _print_counts("By level", result.counts_by_level)
+    _print_counts("By segment", result.counts_by_segment)
+    _print_counts("By area", result.counts_by_area)
+    if args.list or _has_index_filter(args):
+        print("\nIndexed sheets:")
+        for sheet in displayed:
+            fields = [
+                f"PDF {sheet.pdf_page if sheet.pdf_page is not None else '-'}",
+                sheet.sheet_number or "[unidentified]",
+                sheet.sheet_kind.value,
+                sheet.subject.value,
+            ]
+            if sheet.level:
+                fields.append(f"level={sheet.level}")
+            if sheet.segment:
+                fields.append(f"segment={sheet.segment}")
+            if sheet.area:
+                fields.append(f"area={','.join(sheet.area)}")
+            print(" | ".join(fields))
+    if args.debug:
+        print("\nClassification explanations:")
+        for sheet in displayed:
+            print(f"\n{sheet.sheet_number or '[unidentified]'} | PDF {sheet.pdf_page}")
+            print(f"Original actual title: {sheet.actual_title or '-'}")
+            print(f"Original declared title: {sheet.declared_title or '-'}")
+            print(f"Normalized title: {sheet.classification_title or '-'}")
+            print(f"Candidate rules: {', '.join(sheet.candidate_rules) or '-'}")
+            print(f"Matched rule: {sheet.matched_rule or '-'}")
+            print(f"Evidence: {', '.join(sheet.classification_evidence) or '-'}")
+            print(f"Confidence: {sheet.classification_confidence:.2f}")
+            print(f"Warnings: {', '.join(sheet.warnings) or '-'}")
+    return 0
+
+
+def _print_counts(label: str, values) -> None:
+    print(f"\n{label}:")
+    if not values:
+        print("None")
+        return
+    for key, count in values.items():
+        print(f"{key}: {count}")
+
+
+def _has_index_filter(args: argparse.Namespace) -> bool:
+    return bool(
+        args.sheet or args.page or args.kind or args.subject or args.level
+        or args.segment or args.area or args.unknown_only
+    )
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "inspect":
@@ -450,7 +551,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_sheet_list(args)
     if args.command == "title-blocks":
         return _run_title_blocks(args)
-    return _run_reconcile_sheets(args)
+    if args.command == "reconcile-sheets":
+        return _run_reconcile_sheets(args)
+    return _run_package_index(args)
 
 
 if __name__ == "__main__":
