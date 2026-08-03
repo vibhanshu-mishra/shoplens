@@ -7,7 +7,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from shoplens.doctor import run_doctor
 from shoplens.classification import (
@@ -476,15 +476,27 @@ def _run_package_index(args: argparse.Namespace) -> int:
         area=args.area,
         unknown_only=args.unknown_only,
     )
+    active_filters = _active_index_filters(args)
     if args.json:
         payload = result.to_dict(include_debug=args.debug)
         payload["sheets"] = [sheet.to_dict(include_debug=args.debug) for sheet in displayed]
         payload["displayed_sheet_count"] = len(displayed)
+        if active_filters:
+            payload["filtered_count"] = len(displayed)
+            payload["active_filters"] = active_filters
         print(json.dumps(payload, indent=2))
         return 0
 
     print(f"Package: {args.pdf.name}")
     print(f"Total indexed sheets: {result.indexed_sheet_count}")
+    if active_filters:
+        print(f"Matching sheets: {len(displayed)}")
+        filters = ", ".join(
+            f"{key}={str(value).lower() if isinstance(value, bool) else value}"
+            for key, value in active_filters.items()
+        )
+        print(f"Active filters: {filters}")
+        print("\nWhole-package summary:")
     print(f"Classified sheets: {result.classified_sheet_count}")
     print(f"Unknown sheets: {result.unknown_sheet_count}")
     _print_counts("By kind", result.counts_by_kind)
@@ -492,8 +504,8 @@ def _run_package_index(args: argparse.Namespace) -> int:
     _print_counts("By level", result.counts_by_level)
     _print_counts("By segment", result.counts_by_segment)
     _print_counts("By area", result.counts_by_area)
-    if args.list or _has_index_filter(args):
-        print("\nIndexed sheets:")
+    if displayed and (args.list or active_filters):
+        print("\nMatching sheets:" if active_filters else "\nIndexed sheets:")
         for sheet in displayed:
             fields = [
                 f"PDF {sheet.pdf_page if sheet.pdf_page is not None else '-'}",
@@ -508,7 +520,9 @@ def _run_package_index(args: argparse.Namespace) -> int:
             if sheet.area:
                 fields.append(f"area={','.join(sheet.area)}")
             print(" | ".join(fields))
-    if args.debug:
+    elif active_filters:
+        print("\nNo sheets matched the selected filters.")
+    if args.debug and displayed:
         print("\nClassification explanations:")
         for sheet in displayed:
             print(f"\n{sheet.sheet_number or '[unidentified]'} | PDF {sheet.pdf_page}")
@@ -532,11 +546,18 @@ def _print_counts(label: str, values) -> None:
         print(f"{key}: {count}")
 
 
-def _has_index_filter(args: argparse.Namespace) -> bool:
-    return bool(
-        args.sheet or args.page or args.kind or args.subject or args.level
-        or args.segment or args.area or args.unknown_only
-    )
+def _active_index_filters(args: argparse.Namespace) -> Dict[str, object]:
+    values = {
+        "sheet": args.sheet,
+        "page": args.page,
+        "kind": args.kind,
+        "subject": args.subject,
+        "level": args.level,
+        "segment": args.segment,
+        "area": args.area,
+        "unknown-only": True if args.unknown_only else None,
+    }
+    return {key: value for key, value in values.items() if value is not None}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
