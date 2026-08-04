@@ -640,6 +640,63 @@ only. `--include-rejected` or `--debug` adds rejected geometry to the overlay
 and structured output. No confidential PDF page image is embedded, and nearby
 section labels are not associated with candidates.
 
+## Repetitive linear patterns
+
+`linear-patterns` consumes accepted `MEMBER_LINE_CANDIDATE` records and groups
+only what is geometrically observable. Its controlled taxonomy is
+`PARALLEL_LINE_GROUP`, `REGULAR_SPACING_FIELD`, `DOUBLE_LINE_PAIR_GROUP`,
+`ORTHOGONAL_NETWORK`, `COLLINEAR_CHAIN_GROUP`, `DENSE_LINEAR_FIELD`,
+`ISOLATED_CANDIDATE_GROUP`, `MIXED_LINEAR_PATTERN`, and
+`UNKNOWN_LINEAR_PATTERN`. These names do not confirm joists, beams, deck,
+hatching, walls, slab edges, grating, or physical quantities.
+
+Each accepted candidate has at most one primary pattern. Orthogonal networks
+are maximal connected components of meaningfully intersecting horizontal and
+vertical primary patterns. They are hierarchical records referencing component
+patterns, and their candidate memberships are secondary references that never
+inflate primary accounting. Pairwise combinations inside one connected
+component are suppressed. A deterministic signature covers component IDs,
+spatial bounds, grid labels, and unique candidate coverage:
+
+```text
+input candidates = primary-clustered candidates + unclustered candidates
+```
+
+Clustering uses 4-degree orientation buckets and 180-PDF-unit spatial bins,
+then local compatibility checks for angle, perpendicular proximity, and
+longitudinal extent. This keeps approximately linear behavior for locally
+bounded drawing density instead of comparing every candidate on the sheet.
+Orientation uses 180-degree circular distance, so reversed endpoints agree but
++45-degree and -45-degree families remain separate. Spacing is measured by
+projection onto the family perpendicular; median absolute relative variation
+makes isolated large gaps robust and records inferred missing geometric slots
+without claiming missing members. Pair groups require multiple close parallel
+pairs. Orthogonal networks require overlapping horizontal and vertical primary
+groups. Density is candidate count divided by the pattern bounding-box area in
+PDF coordinate units squared.
+
+```bash
+.venv/bin/python -m shoplens.cli linear-patterns drawing.pdf --sheet S1-20A --list
+.venv/bin/python -m shoplens.cli linear-patterns drawing.pdf --page 27 --json
+.venv/bin/python -m shoplens.cli linear-patterns drawing.pdf --sheet S1-20A \
+  --svg /tmp/shoplens-linear-patterns-S1-20A.svg
+```
+
+The SVG contains vector geometry, grid axes, plan bounds, pattern boxes and
+pattern labels only; it never embeds the source PDF image. Confidence is
+deterministic rule strength, not probability. Nearby text is not used to assign
+sections or engineering meaning to a pattern.
+
+With `--debug`, the command reports monotonic stage timings for package lookup,
+page geometry, grid extraction, member candidates, spatial partitioning,
+primary clustering, pair analysis, network construction, optional SVG writing,
+and total runtime. Unique network candidate coverage counts each candidate once
+across retained networks; secondary network membership counts references and
+may be larger if genuinely distinct networks overlap.
+`redundant_networks_suppressed_count` is the number of records removed relative
+to the former pairwise bounding-box-overlap policy, including former overlaps
+that did not contain a meaningful candidate intersection.
+
 ## Tests
 
 Run the ShopLens unit tests without drawings:

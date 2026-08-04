@@ -5,6 +5,7 @@ import json
 import multiprocessing
 import re
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,12 @@ from shoplens.members import (
     detect_member_line_candidates,
     export_member_candidates_svg,
     filter_member_candidates,
+)
+from shoplens.patterns import (
+    LinearPatternType,
+    detect_linear_patterns,
+    export_linear_patterns_svg,
+    filter_linear_patterns,
 )
 from shoplens.models import SectionFamily, SteelLabel, TextDiagnostic
 from shoplens.reporting import (
@@ -257,6 +264,28 @@ def _parser() -> argparse.ArgumentParser:
     member_parser.add_argument("--min-confidence", type=_confidence_value, default=0.0)
     member_parser.add_argument("--include-rejected", action="store_true")
     member_parser.add_argument("--candidate", help="show one candidate ID")
+
+    pattern_parser = subparsers.add_parser(
+        "linear-patterns", help="group accepted member-line candidates into neutral patterns"
+    )
+    pattern_parser.add_argument("pdf", type=Path)
+    pattern_selector = pattern_parser.add_mutually_exclusive_group(required=True)
+    pattern_selector.add_argument("--sheet", help="select a reconciled sheet number")
+    pattern_selector.add_argument("--page", type=_one_based_page, help="select a one-based PDF page")
+    pattern_parser.add_argument("--list", action="store_true")
+    pattern_parser.add_argument("--json", action="store_true")
+    pattern_parser.add_argument("--debug", action="store_true")
+    pattern_parser.add_argument("--svg", type=Path)
+    pattern_parser.add_argument("--pattern", help="show one pattern ID")
+    pattern_parser.add_argument("--type", choices=[value.value for value in LinearPatternType])
+    pattern_parser.add_argument("--orientation", choices=["HORIZONTAL", "VERTICAL", "DIAGONAL", "MIXED"])
+    pattern_parser.add_argument("--min-candidates", type=int, default=0)
+    pattern_parser.add_argument("--min-confidence", type=_confidence_value, default=0.0)
+    pattern_parser.add_argument("--regular-only", action="store_true")
+    pattern_parser.add_argument("--dense-only", action="store_true")
+    pattern_parser.add_argument("--unclustered-only", action="store_true")
+    pattern_parser.add_argument("--include-candidates", action="store_true")
+    pattern_parser.add_argument("--include-secondary", action="store_true")
     return parser
 
 
@@ -1155,6 +1184,165 @@ def _grid_endpoint_count(item) -> int:
     return int(item.start_near_grid) + int(item.end_near_grid)
 
 
+def _run_linear_patterns(args: argparse.Namespace) -> int:
+    total_started = time.monotonic()
+    stage_started = time.monotonic()
+    declared, actual, items, status = _extract_package_title_blocks_with_items(args.pdf)
+    if declared is None or actual is None or items is None:
+        return status
+    package = build_package_index(reconcile_sheets(declared, actual))
+    selected = _selected_package_sheet(package.sheets, args.sheet, args.page)
+    if selected is None:
+        identity = args.sheet.strip().upper() if args.sheet else f"PDF page {args.page}"
+        print(f"Error: {identity} was not found in the package index.", file=sys.stderr)
+        return 7
+    page = selected.pdf_page
+    if page is None:
+        print("Error: the selected sheet has no reconciled PDF page.", file=sys.stderr)
+        return 7
+    page_items = [item for item in items if int(item.page) == page]
+    package_lookup_seconds = time.monotonic() - stage_started
+    stage_started = time.monotonic()
+    try:
+        geometry = extract_page_geometry(args.pdf, [page], page_items)[0]
+    except (OSError, RuntimeError, ValueError, IndexError) as exc:
+        print(f"Error: could not extract page geometry: {exc}", file=sys.stderr)
+        return 8
+    geometry_seconds = time.monotonic() - stage_started
+    stage_started = time.monotonic()
+    grid = detect_grid_system(str(args.pdf), geometry, page_items, selected)
+    grid_seconds = time.monotonic() - stage_started
+    stage_started = time.monotonic()
+    candidates = detect_member_line_candidates(str(args.pdf), geometry, grid, page_items, selected)
+    member_seconds = time.monotonic() - stage_started
+    result = detect_linear_patterns(candidates)
+    result.stage_timings.update({
+        "package_sheet_lookup_seconds": package_lookup_seconds,
+        "page_geometry_extraction_seconds": geometry_seconds,
+        "grid_extraction_seconds": grid_seconds,
+        "member_line_candidate_extraction_seconds": member_seconds,
+        "svg_generation_seconds": 0.0,
+    })
+    pattern_type = LinearPatternType(args.type) if args.type else None
+    source_patterns = result.patterns + (result.hierarchical_patterns if args.include_secondary else [])
+    displayed = filter_linear_patterns(
+        source_patterns, args.pattern, pattern_type, args.orientation, args.min_candidates,
+        args.min_confidence, args.regular_only, args.dense_only,
+    )
+    if args.unclustered_only:
+        displayed = []
+    active_filters = {
+        key: value for key, value in {
+            "sheet": args.sheet.strip().upper() if args.sheet else None,
+            "page": args.page, "pattern": args.pattern.strip().upper() if args.pattern else None,
+            "type": args.type, "orientation": args.orientation,
+            "min-candidates": args.min_candidates or None,
+            "min-confidence": args.min_confidence or None,
+            "regular-only": True if args.regular_only else None,
+            "dense-only": True if args.dense_only else None,
+            "unclustered-only": True if args.unclustered_only else None,
+            "include-secondary": True if args.include_secondary else None,
+        }.items() if value is not None
+    }
+    result.active_filters = active_filters
+    if args.svg:
+        stage_started = time.monotonic()
+        try:
+            export_linear_patterns_svg(args.svg, result, displayed)
+        except OSError as exc:
+            print(f"Error: could not write SVG: {exc}", file=sys.stderr)
+            return 9
+        result.stage_timings["svg_generation_seconds"] = time.monotonic() - stage_started
+    result.stage_timings["total_runtime_seconds"] = time.monotonic() - total_started
+    if args.json:
+        payload = result.to_dict(args.include_candidates, args.include_secondary)
+        payload["patterns"] = [item.to_dict(args.include_candidates) for item in displayed]
+        payload["filtered_pattern_count"] = len(displayed)
+        payload["filtered_unclustered_count"] = (
+            len(result.unclustered_candidates) if args.unclustered_only else 0
+        )
+        if args.svg:
+            payload["svg_export"] = str(args.svg)
+        print(json.dumps(payload, indent=2))
+        return 0
+    print(f"Sheet: {result.sheet_number or '[unidentified]'}")
+    print(f"PDF page: {result.pdf_page}")
+    print(f"Input member-line candidates: {result.input_candidate_count}")
+    print(f"Candidates assigned to a primary pattern: {result.primary_clustered_candidate_count}")
+    print(f"Unclustered candidates: {result.unclustered_candidate_count}")
+    print(f"Primary patterns: {result.pattern_count}")
+    print(f"Hierarchical patterns: {result.hierarchical_pattern_count}")
+    print("\nBy pattern type:")
+    for value in LinearPatternType:
+        print(f"{value.value}: {result.primary_patterns_by_type.get(value.value, 0)}")
+    if result.hierarchical_pattern_count:
+        hierarchical_types = Counter(item.pattern_type.value for item in result.hierarchical_patterns)
+        print("\nHierarchical pattern types:")
+        for value, count in sorted(hierarchical_types.items()):
+            print(f"{value}: {count}")
+    orientations = Counter(item.primary_orientation for item in displayed)
+    print("\nBy orientation:")
+    for value in ("HORIZONTAL", "VERTICAL", "DIAGONAL", "MIXED", "OTHER"):
+        print(f"{value}: {orientations[value]}")
+    if args.list:
+        print("\nLinear patterns:")
+        if not displayed:
+            print("No linear patterns matched the selected filters.")
+        for item in displayed:
+            print(f"{item.pattern_id} | {item.pattern_type.value} | {item.primary_orientation}")
+            print(
+                f"  candidates={item.candidate_count} | median_spacing="
+                f"{item.median_spacing if item.median_spacing is not None else '-'} | "
+                f"confidence={item.confidence:.3f}"
+            )
+            if args.include_candidates:
+                print(f"  candidate_ids={','.join(item.candidate_ids)}")
+    if args.unclustered_only and args.list:
+        print("\nUnclustered member-line candidates:")
+        for item in result.unclustered_candidates:
+            print(f"{item.candidate_id} | {item.orientation_class.value} | length={item.length:.2f}")
+    if args.debug:
+        print("\nPattern diagnostics:")
+        print(
+            "Primary accounting: "
+            f"{result.input_candidate_count} = {result.primary_clustered_candidate_count} + "
+            f"{result.unclustered_candidate_count}"
+        )
+        print(f"Secondary memberships: {result.secondary_membership_count}")
+        print(f"Unique network candidates: {result.network_candidates_unique_count}")
+        print(f"Secondary network memberships: {result.secondary_network_membership_count}")
+        print(f"Orthogonal networks: {result.orthogonal_network_count}")
+        print(f"Redundant networks suppressed: {result.redundant_networks_suppressed_count}")
+        for network in result.hierarchical_patterns:
+            print(
+                f"Network {network.pattern_id} | signature={network.network_signature} | "
+                f"components={len(network.component_pattern_ids)} "
+                f"(H={network.horizontal_component_count},V={network.vertical_component_count}) | "
+                f"unique_candidates={network.unique_primary_candidate_count} | "
+                f"intersections={network.component_intersection_count} | "
+                f"coverage={network.candidate_coverage_fraction:.6f}"
+            )
+        print(f"Unclustered reason INSUFFICIENT_REPETITION: {result.unclustered_candidate_count}")
+        print("Stage timings (seconds):")
+        for name in (
+            "package_sheet_lookup_seconds", "page_geometry_extraction_seconds",
+            "grid_extraction_seconds", "member_line_candidate_extraction_seconds",
+            "spatial_partitioning_seconds", "primary_pattern_clustering_seconds",
+            "double_line_pair_analysis_seconds", "orthogonal_network_construction_seconds",
+            "svg_generation_seconds", "total_runtime_seconds",
+        ):
+            print(f"  {name}: {result.stage_timings.get(name, 0.0):.6f}")
+        for item in displayed:
+            print(
+                f"{item.pattern_id} | angle={item.principal_angle:.2f} | "
+                f"offsets={item.perpendicular_offsets} | spacing={item.spacing_values} | "
+                f"evidence={','.join(item.evidence)} | warnings={','.join(item.warnings) or '-'}"
+            )
+    if args.svg:
+        print(f"SVG export: {args.svg}")
+    return 0
+
+
 def _inventory_sheet_payload(sheet, family, section):
     payload = sheet.to_dict()
     detections = matching_detections(sheet, family=family, section=section)
@@ -1232,6 +1420,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_grid_system(args)
     if args.command == "grid-locate-sections":
         return _run_grid_locate_sections(args)
+    if args.command == "linear-patterns":
+        return _run_linear_patterns(args)
     return _run_member_line_candidates(args)
 
 
