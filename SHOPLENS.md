@@ -409,6 +409,83 @@ To add a safe rule, place a narrowly worded pattern in
 any broader fallback it supersedes, then add synthetic positive, negative, and
 ambiguity tests. Do not add a rule solely to eliminate an unknown count.
 
+## Build a classified section-label inventory
+
+`section-inventory` joins accepted steel-section labels to classified sheets using
+the one-based PDF page number. It does not infer physical members: repeated
+`W18X35` records are label detections and may be distinct annotations, schedules,
+references, or duplicated PDF text. No count produced here is a beam or column
+quantity.
+
+The command builds the package index once, extracts positioned text in isolated
+three-page batches, and reuses those lightweight records for title blocks and steel
+detection. It does not parse the PDF separately for every sheet. Every indexed
+sheet remains in the inventory, including sheets with zero recognized labels.
+Unmatched detection pages and pages with multiple index records remain in an
+explicit unmatched list with warnings; they are never joined by title or guessed
+sheet number.
+
+The default mode uses the existing safe coordinate deduplication rule: only the
+same page, normalized section, and near-identical bounding box are collapsed.
+`--raw` keeps every accepted source detection. In deduplicated mode, detection
+counts are retained-record counts and do not add `duplicate_count` again.
+`duplicate_count` remains evidence of how many overlapping source records were
+represented. Package summaries report both detection occurrences and distinct
+sheet counts. A sheet with several named areas contributes its detections to each
+area bucket intentionally.
+
+Run the real package from macOS Terminal:
+
+```bash
+python -m shoplens.cli section-inventory \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf"
+python -m shoplens.cli section-inventory \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --list
+python -m shoplens.cli section-inventory \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --sheet S1-20A --list
+python -m shoplens.cli section-inventory \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --subject ROOF_FRAMING --family W --list
+python -m shoplens.cli section-inventory \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --section W18X35 --list
+python -m shoplens.cli section-inventory \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --without-detections --list
+```
+
+Metadata and detection filters can be combined: `--sheet`, `--page`, `--kind`,
+`--subject`, `--level`, `--segment`, `--area`, `--family`, and `--section`.
+`--with-detections` and `--without-detections` select sheets by presence. Add
+`--detections` only when individual coordinates are needed, or `--debug` to show
+the joined package-index record, extraction pages, raw/deduplicated counts,
+duplicate suppression, filters, and warnings. Framing plans and elevations are
+often the most relevant future inputs for member association, but the inventory
+does not hardcode a sheet-kind restriction.
+
+JSON includes the complete package summary, inventory version, mode, warnings,
+all selected sheets, individual detection coordinates, classification metadata,
+and active filters:
+
+```bash
+python -m shoplens.cli section-inventory drawing.pdf --json
+python -m shoplens.cli section-inventory drawing.pdf \
+  --subject FLOOR_FRAMING --section W18X35 --json
+```
+
+Export one matching detection per CSV row with Python's standard CSV writer:
+
+```bash
+python -m shoplens.cli section-inventory \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --csv /tmp/shoplens-section-inventory.csv
+```
+
+The CSV preserves page, sheet metadata, original and normalized label text,
+family, signed raw coordinates, confidence, duplicate count, and record mode. A
+zero-result selection still writes a valid header-only CSV.
+
 ## Tests
 
 Run the ShopLens unit tests without drawings:
@@ -467,6 +544,9 @@ cargo build --release
   Unusual forms such as 3D views may remain unknown until a reusable taxonomy rule
   is justified. A title that names multiple levels produces `LEVEL_CONFLICT`
   instead of an arbitrary primary level.
+- Section inventory is label-based. It does not associate text with drawn member
+  lines, grids, beams, columns, schedules, or physical quantities, and it does not
+  compare structural sheets with shop drawings.
 - Continuation without repeated headers is limited to the page immediately
   following a confirmed list page inside the selected range. Complex wrapped
   multi-line titles may require future row-continuation logic.

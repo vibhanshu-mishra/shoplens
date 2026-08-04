@@ -1,8 +1,13 @@
 """Synthetic tests for deterministic sheet classification and package indexing."""
 
 import re
+import io
+import json
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
+
+from shoplens import cli
 
 from shoplens.classification import (
     ClassificationTitleSource,
@@ -207,6 +212,73 @@ class PackageIndexTests(unittest.TestCase):
         self.assertEqual(result.unknown_sheet_count, 1)
         self.assertIn("S0-10: UNKNOWN_CLASSIFICATION", result.warnings)
         self.assertEqual([sheet.sheet_number for sheet in filter_sheets(result.sheets, unknown_only=True)], ["S0-10"])
+
+
+class PackageIndexCliOutputTests(unittest.TestCase):
+    def setUp(self):
+        self.entries = [
+            entry("S1-10A", "FOUNDATION PLAN - SEGMENT A", 1),
+            entry("S1-20A", "SECOND FLOOR FRAMING PLAN - SEGMENT A", 2),
+            entry("S1-30A", "OFFICE ROOF FRAMING PLAN - SEGMENT A", 3),
+            entry("S5-30", "STAIR FRAMING DETAILS", 4),
+        ]
+
+    def run_cli(self, *options):
+        arguments = ["package-index", "drawing.pdf"] + list(options)
+        output = io.StringIO()
+        with patch.object(cli, "_extract_package_title_blocks", return_value=(object(), object(), 0)):
+            with patch.object(cli, "reconcile_sheets", return_value=reconciliation(self.entries)):
+                with redirect_stdout(output):
+                    status = cli.main(arguments)
+        return status, output.getvalue()
+
+    def test_one_filter_reports_matching_count_and_whole_package_scope(self):
+        status, output = self.run_cli("--kind", "DETAIL", "--list")
+        self.assertEqual(status, 0)
+        self.assertIn("Matching sheets: 1", output)
+        self.assertIn("Active filters: kind=DETAIL", output)
+        self.assertIn("Whole-package summary:", output)
+        self.assertIn("S5-30", output)
+
+    def test_multiple_filters_return_several_records(self):
+        status, output = self.run_cli("--kind", "PLAN", "--segment", "A", "--list")
+        self.assertEqual(status, 0)
+        self.assertIn("Matching sheets: 3", output)
+        self.assertIn("Active filters: kind=PLAN, segment=A", output)
+        self.assertEqual(output.count(" | segment=A"), 3)
+
+    def test_zero_records_has_no_empty_heading(self):
+        status, output = self.run_cli("--segment", "Z", "--list")
+        self.assertEqual(status, 0)
+        self.assertIn("Matching sheets: 0", output)
+        self.assertIn("No sheets matched the selected filters.", output)
+        self.assertNotIn("\nMatching sheets:\n", output)
+        self.assertNotIn("Indexed sheets:", output)
+
+    def test_unknown_only_with_no_unknowns(self):
+        status, output = self.run_cli("--unknown-only")
+        self.assertEqual(status, 0)
+        self.assertIn("Active filters: unknown-only=true", output)
+        self.assertIn("No sheets matched the selected filters.", output)
+        self.assertNotIn("Indexed sheets:", output)
+
+    def test_filtered_json_adds_metadata_without_restructuring(self):
+        status, output = self.run_cli("--kind", "DETAIL", "--json")
+        payload = json.loads(output)
+        self.assertEqual(status, 0)
+        self.assertEqual(payload["displayed_sheet_count"], 1)
+        self.assertEqual(payload["filtered_count"], 1)
+        self.assertEqual(payload["active_filters"], {"kind": "DETAIL"})
+        self.assertEqual(payload["sheets"][0]["sheet_number"], "S5-30")
+
+    def test_unfiltered_output_remains_unchanged(self):
+        status, output = self.run_cli("--list")
+        self.assertEqual(status, 0)
+        self.assertIn("Total indexed sheets: 4", output)
+        self.assertIn("Indexed sheets:", output)
+        self.assertNotIn("Matching sheets:", output)
+        self.assertNotIn("Active filters:", output)
+        self.assertNotIn("Whole-package summary:", output)
 
 
 if __name__ == "__main__":
