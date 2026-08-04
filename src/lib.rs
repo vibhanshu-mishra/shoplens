@@ -57,7 +57,16 @@ pub use markdown::{
     MarkdownProfile,
 };
 pub use process_mode::ProcessMode;
-pub use types::{LayoutComplexity, PdfLine, PdfRect, TextItem};
+pub use types::{LayoutComplexity, PageGeometry, PdfLine, PdfRect, TextItem};
+
+/// Extract page boxes and vector line/rectangle geometry from selected pages.
+/// Page numbers are 1-indexed, matching positioned-text extraction.
+pub fn extract_page_geometries<P: AsRef<Path>>(
+    path: P,
+    pages: Option<&HashSet<u32>>,
+) -> Result<Vec<PageGeometry>, PdfError> {
+    extractor::extract_page_geometries(path, pages)
+}
 
 use lopdf::Document;
 use std::collections::{BTreeMap, HashMap, HashSet};

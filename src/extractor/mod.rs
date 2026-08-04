@@ -12,7 +12,7 @@ mod xobjects;
 
 use crate::text_utils::{is_cjk_char, is_rtl_text};
 use crate::tounicode::FontCMaps;
-use crate::types::{PageExtraction, PdfLine, PdfRect, TextItem};
+use crate::types::{PageExtraction, PageGeometry, PdfLine, PdfRect, TextItem};
 use crate::PdfError;
 use log::debug;
 use lopdf::{Document, Object, ObjectId};
@@ -71,6 +71,109 @@ fn extract_text_from_doc(doc: &Document) -> Result<String, PdfError> {
 /// Extract text with position information from PDF file
 pub fn extract_text_with_positions<P: AsRef<Path>>(path: P) -> Result<Vec<TextItem>, PdfError> {
     extract_text_with_positions_pages(path, None)
+}
+
+/// Extract page boxes and vector geometry using the same content-stream state
+/// machine and coordinate normalization as positioned text.
+pub fn extract_page_geometries<P: AsRef<Path>>(
+    path: P,
+    page_filter: Option<&HashSet<u32>>,
+) -> Result<Vec<PageGeometry>, PdfError> {
+    crate::validate_pdf_file(&path)?;
+    let (doc, _) = crate::load_document_from_path(&path)?;
+    let font_cmaps = FontCMaps::from_doc(&doc);
+    let pages = doc.get_pages();
+    let mut style_cache = FontStyleCache::new();
+    let mut result = Vec::new();
+
+    for (page, &page_id) in &pages {
+        if page_filter.is_some_and(|filter| !filter.contains(page)) {
+            continue;
+        }
+        let ((_, rectangles, lines), _, coordinates_rotated) =
+            extract_page_text_items(&doc, page_id, *page, &font_cmaps, false, &mut style_cache)?;
+        let media =
+            inherited_page_box(&doc, page_id, b"MediaBox").unwrap_or([0.0, 0.0, 612.0, 792.0]);
+        let crop = inherited_page_box(&doc, page_id, b"CropBox").unwrap_or(media);
+        let rotation = inherited_page_rotation(&doc, page_id).unwrap_or(0);
+        let (media_box, crop_box, coordinate_system) = if coordinates_rotated {
+            (
+                rotate_page_box(media),
+                rotate_page_box(crop),
+                "PDF_INSPECTOR_ROTATED_90_CCW_BOTTOM_LEFT".to_string(),
+            )
+        } else {
+            (media, crop, "PDF_USER_SPACE_BOTTOM_LEFT".to_string())
+        };
+        result.push(PageGeometry {
+            page: *page,
+            width: crop_box[2] - crop_box[0],
+            height: crop_box[3] - crop_box[1],
+            rotation,
+            media_box,
+            crop_box,
+            coordinate_system,
+            lines,
+            rectangles,
+            warnings: vec![
+                "CURVE_GEOMETRY_NOT_EXPOSED".to_string(),
+                "DASH_PATTERN_NOT_EXPOSED".to_string(),
+            ],
+        });
+    }
+    Ok(result)
+}
+
+fn rotate_page_box(value: [f32; 4]) -> [f32; 4] {
+    [value[1], -value[2], value[3], -value[0]]
+}
+
+fn inherited_page_box(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<[f32; 4]> {
+    let mut id = page_id;
+    for _ in 0..32 {
+        let dict = doc.get_dictionary(id).ok()?;
+        if let Ok(object) = dict.get(key) {
+            let array = match object {
+                Object::Array(values) => Some(values.clone()),
+                Object::Reference(reference) => match doc.get_object(*reference) {
+                    Ok(Object::Array(values)) => Some(values.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(values) = array {
+                let numbers: Vec<f32> = values.iter().filter_map(get_number).collect();
+                if numbers.len() >= 4 {
+                    return Some([
+                        numbers[0].min(numbers[2]),
+                        numbers[1].min(numbers[3]),
+                        numbers[0].max(numbers[2]),
+                        numbers[1].max(numbers[3]),
+                    ]);
+                }
+            }
+        }
+        match dict.get(b"Parent") {
+            Ok(Object::Reference(parent)) => id = *parent,
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn inherited_page_rotation(doc: &Document, page_id: ObjectId) -> Option<i32> {
+    let mut id = page_id;
+    for _ in 0..32 {
+        let dict = doc.get_dictionary(id).ok()?;
+        if let Ok(Object::Integer(value)) = dict.get(b"Rotate") {
+            return Some((*value as i32).rem_euclid(360));
+        }
+        match dict.get(b"Parent") {
+            Ok(Object::Reference(parent)) => id = *parent,
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// Extract text with positions from a file, limited to specific pages.

@@ -204,6 +204,23 @@ class TestExtractTextWithPositions:
         assert all(item.page == 1 for item in items)
 
 
+class TestExtractPageGeometry:
+    def test_page_filter_boxes_and_vector_collections(self):
+        geometries = pdf_inspector.extract_page_geometry(
+            fixture_path("thermo-freon12.pdf"), pages=[1]
+        )
+        assert len(geometries) == 1
+        geometry = geometries[0]
+        assert geometry.page == 1
+        assert geometry.width > 0
+        assert geometry.height > 0
+        assert len(geometry.media_box) == 4
+        assert len(geometry.crop_box) == 4
+        assert isinstance(geometry.lines, list)
+        assert isinstance(geometry.rectangles, list)
+        assert "BOTTOM_LEFT" in geometry.coordinate_system
+
+
 # ---------------------------------------------------------------------------
 # extract_text_in_regions / extract_text_in_regions_bytes
 # ---------------------------------------------------------------------------

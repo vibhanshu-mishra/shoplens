@@ -486,6 +486,73 @@ The CSV preserves page, sheet metadata, original and normalized label text,
 family, signed raw coordinates, confidence, duplicate count, and record mode. A
 zero-result selection still writes a valid header-only CSV.
 
+## Extract a plan grid system
+
+`grid-system` extracts one selected plan page at a time. It reports contextual
+grid-bubble labels, horizontal and vertical logical axes, merged source
+segments, approximate extents, intersections, evidence, rejected candidates,
+and confidence. It does not associate an axis with a beam, column, steel label,
+or physical member.
+
+ShopLens keeps `pdf_inspector` as its fast text, title-block, and classification
+provider. The checked-in Rust parser already tracks the current transformation
+matrix and internally extracts stroked `m`/`l` line segments and `re`
+rectangles in the same space as positioned text. This branch adds an additive
+geometry binding for that existing information. Until a local native extension
+is rebuilt with the binding, the adapter falls back to `pypdf>=5,<6`, a
+pure-Python library under the permissive BSD-3-Clause license. No PyMuPDF or
+copyleft runtime dependency was added. The fallback is necessary only because
+the previously published Python API exposes positioned text but not page boxes
+or vector paths.
+
+The geometry adapter preserves PDF user-space values and never applies
+`abs(x)` or `abs(y)`. `/MediaBox`, `/CropBox`, and `/Rotate` are recorded
+separately. A page's displayed rotation does not by itself prove that
+`pdf_inspector` rotated extracted coordinates: ShopLens tests positioned-text
+anchors against each explicitly transformed crop box and selects the matching
+coordinate convention. This preserves the negative Y coordinates on layouts
+that `pdf_inspector` normalizes by 90 degrees while leaving the other layout in
+raw bottom-left PDF coordinates. Rotation and non-zero crop-offset conversions
+have synthetic tests.
+
+Grid candidates require contextual evidence. The current deterministic detector
+uses consistently sized ellipse bubbles, aligned label runs, repeated labels at
+opposite ends when present, collinear line coverage, and perpendicular
+intersections. Dashed or split paths are retained as source segments and merged
+into logical extents. Short lines, inconsistent bubbles, detail/section
+references, and uncontextual schedule numbers do not become axes. Spatially
+separate similarly strong label runs produce `MULTIPLE_SIMILAR_GRID_SYSTEMS`
+instead of being silently merged.
+
+Run one of the known sheets from macOS Terminal:
+
+```bash
+python -m shoplens.cli grid-system \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --sheet S1-20A --list
+python -m shoplens.cli grid-system \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --sheet S1-20A --debug
+python -m shoplens.cli grid-system \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --sheet S1-20A --svg /tmp/shoplens-grid-S1-20A.svg
+open /tmp/shoplens-grid-S1-20A.svg
+```
+
+`--page 27` can be used instead of `--sheet S1-20A`. Add `--json` for the
+complete page geometry, axis source segments, label evidence, classification
+metadata, rejected candidates, coordinate conversion, warnings, and grid
+version. The SVG is standard-library XML containing geometry and text labels
+only; it never embeds the confidential PDF page image.
+
+Current limits are deliberate. Form XObject geometry is not recursively
+expanded by the fallback. Dash patterns and line widths are available only
+when the provider retains them. Bezier paths are reduced to explainable shape
+bounds for bubble evidence, not treated as general-purpose CAD curves. The
+detector returns the strongest spatial grid system and warns about close
+alternatives; it does not process all 92 sheets by default, use OCR, or claim
+that every architectural offset grid will be resolved.
+
 ## Tests
 
 Run the ShopLens unit tests without drawings:

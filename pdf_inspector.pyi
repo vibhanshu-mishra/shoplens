@@ -42,6 +42,35 @@ class TextItem:
     is_strikeout: bool
     item_type: str
 
+class GeometryLine:
+    """A vector line segment in the positioned-text coordinate system."""
+    page: int
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+class GeometryRectangle:
+    """A rectangle emitted by a PDF ``re`` path operator."""
+    page: int
+    x: float
+    y: float
+    width: float
+    height: float
+
+class PageGeometry:
+    """Page boxes and vector geometry in positioned-text coordinates."""
+    page: int
+    width: float
+    height: float
+    rotation: int
+    media_box: list[float]
+    crop_box: list[float]
+    coordinate_system: str
+    lines: list[GeometryLine]
+    rectangles: list[GeometryRectangle]
+    warnings: list[str]
+
 class RegionText:
     """Extracted text for a single region."""
     text: str
@@ -114,6 +143,17 @@ def extract_text_with_positions(path: str, pages: Optional[list[int]] = None) ->
 
 def extract_text_with_positions_bytes(data: bytes, pages: Optional[list[int]] = None) -> list[TextItem]:
     """Extract text with position information from bytes."""
+    ...
+
+def extract_page_geometry(
+    path: str,
+    pages: Optional[list[int]] = None,
+) -> list[PageGeometry]:
+    """Extract page boxes and vector line/rectangle geometry.
+
+    Page numbers are 1-indexed and output coordinates use the same convention
+    as :func:`extract_text_with_positions`.
+    """
     ...
 
 def extract_text_in_regions(
