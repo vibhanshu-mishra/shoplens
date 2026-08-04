@@ -5,6 +5,7 @@ import json
 import multiprocessing
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -20,6 +21,13 @@ from shoplens.extraction import (
     PdfInspectorUnavailableError,
     extract_positioned_text,
     get_pdf_page_count,
+)
+from shoplens.inventory import (
+    InventoryFilters,
+    build_section_inventory,
+    export_inventory_csv,
+    filter_inventory_sheets,
+    matching_detections,
 )
 from shoplens.models import SectionFamily, SteelLabel, TextDiagnostic
 from shoplens.reporting import (
@@ -150,6 +158,31 @@ def _parser() -> argparse.ArgumentParser:
     index_parser.add_argument("--segment", help="filter by segment identifier")
     index_parser.add_argument("--area", help="filter by named physical area")
     index_parser.add_argument("--unknown-only", action="store_true")
+
+    inventory_parser = subparsers.add_parser(
+        "section-inventory", help="join classified sheets to detected steel labels"
+    )
+    inventory_parser.add_argument("pdf", type=Path)
+    inventory_parser.add_argument("--list", action="store_true", help="list per-sheet detection counts")
+    inventory_parser.add_argument("--detections", action="store_true", help="show positioned detection records")
+    inventory_parser.add_argument("--json", action="store_true", help="output structured JSON")
+    inventory_parser.add_argument("--debug", action="store_true", help="explain joins and duplicate suppression")
+    inventory_parser.add_argument("--raw", action="store_true", help="use every accepted source detection")
+    inventory_parser.add_argument("--csv", type=Path, help="export matching detections to CSV")
+    inventory_parser.add_argument("--sheet", help="filter by sheet number")
+    inventory_parser.add_argument("--page", type=_one_based_page, help="filter by one-based PDF page")
+    inventory_parser.add_argument("--kind", choices=[value.value for value in SheetKind])
+    inventory_parser.add_argument("--subject", choices=[value.value for value in StructuralSubject])
+    inventory_parser.add_argument("--level", help="filter by normalized building level")
+    inventory_parser.add_argument("--segment", help="filter by segment identifier")
+    inventory_parser.add_argument("--area", help="filter by named physical area")
+    inventory_parser.add_argument(
+        "--family", choices=[value.value for value in SectionFamily if value is not SectionFamily.UNKNOWN]
+    )
+    inventory_parser.add_argument("--section", help="filter by normalized steel section")
+    presence = inventory_parser.add_mutually_exclusive_group()
+    presence.add_argument("--with-detections", action="store_true")
+    presence.add_argument("--without-detections", action="store_true")
     return parser
 
 
@@ -367,9 +400,14 @@ def _run_sheet_list(args: argparse.Namespace) -> int:
 
 
 def _extract_package_title_blocks(path: Path):
+    declared, actual, _, status = _extract_package_title_blocks_with_items(path)
+    return declared, actual, status
+
+
+def _extract_package_title_blocks_with_items(path: Path):
     items, page_count, status = _load_all_pages_batched(path)
     if items is None or page_count is None:
-        return None, None, status
+        return None, None, None, status
     sheet_items = [item for item in items if int(item.page) <= 5]
     declared = extract_sheet_list(sheet_items, str(path), list(range(1, min(5, page_count) + 1)))
     actual = extract_title_blocks(
@@ -378,7 +416,7 @@ def _extract_package_title_blocks(path: Path):
         list(range(1, page_count + 1)),
         declared.entries,
     )
-    return declared, actual, 0
+    return declared, actual, items, 0
 
 
 def _run_title_blocks(args: argparse.Namespace) -> int:
@@ -537,6 +575,155 @@ def _run_package_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_section_inventory(args: argparse.Namespace) -> int:
+    declared, actual, items, status = _extract_package_title_blocks_with_items(args.pdf)
+    if declared is None or actual is None or items is None:
+        return status
+    package_index = build_package_index(reconcile_sheets(declared, actual))
+    raw_detections, _, _ = analyze_positioned_text(items)
+    result = build_section_inventory(package_index, raw_detections, raw=args.raw)
+    family = SectionFamily(args.family) if args.family else None
+    inventory_filters = InventoryFilters(
+        sheet_number=args.sheet,
+        page=args.page,
+        kind=SheetKind(args.kind) if args.kind else None,
+        subject=StructuralSubject(args.subject) if args.subject else None,
+        level=args.level,
+        segment=args.segment,
+        area=args.area,
+        family=family,
+        section=args.section,
+        with_detections=args.with_detections,
+        without_detections=args.without_detections,
+    )
+    displayed = filter_inventory_sheets(result.sheets, inventory_filters)
+    active_filters = _active_inventory_filters(args)
+    selected_detections = [
+        detection
+        for sheet in displayed
+        for detection in matching_detections(sheet, family=family, section=args.section)
+    ]
+
+    csv_rows = None
+    if args.csv:
+        try:
+            csv_rows = export_inventory_csv(args.csv, selected_detections)
+        except OSError as exc:
+            print(f"Error: could not write CSV: {exc}", file=sys.stderr)
+            return 6
+
+    if args.json:
+        payload = result.to_dict()
+        payload["sheets"] = [
+            _inventory_sheet_payload(sheet, family, args.section) for sheet in displayed
+        ]
+        payload["filtered_sheet_count"] = len(displayed)
+        payload["filtered_detection_count"] = len(selected_detections)
+        payload["active_filters"] = active_filters
+        if args.csv:
+            payload["csv_export"] = {"path": str(args.csv), "rows_written": csv_rows}
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"Package: {args.pdf.name}")
+    print(f"Indexed sheets: {result.total_indexed_sheets}")
+    print(f"Sheets with detected sections: {result.sheets_with_detections}")
+    print(f"Sheets without detected sections: {result.sheets_without_detections}")
+    print(f"Raw detections: {result.raw_detection_count}")
+    print(f"Deduplicated detections: {result.deduplicated_detection_count}")
+    print(f"Unique normalized sections: {result.unique_section_count}")
+    print(f"Record mode: {result.record_mode}")
+    if active_filters:
+        print(f"Matching sheets: {len(displayed)}")
+        print(f"Matching detections: {len(selected_detections)}")
+        print(f"Active filters: {_format_filters(active_filters)}")
+
+    if active_filters:
+        print("\nWhole-package summary:")
+    print("\nTop detected sections:")
+    for section, counts in sorted(
+        result.counts_by_section.items(),
+        key=lambda value: (-value[1].detection_count, value[0]),
+    )[:10]:
+        print(
+            f"{section}: {counts.detection_count} detections on "
+            f"{counts.sheet_count} sheets"
+        )
+    print("\nBy family:")
+    for family_name, counts in result.counts_by_family.items():
+        print(
+            f"{family_name}: {counts.detection_count} detections on "
+            f"{counts.sheet_count} sheets"
+        )
+
+    if displayed and (args.list or active_filters or args.detections or args.debug):
+        print("\nSheet inventories:")
+        for sheet in displayed:
+            detections = matching_detections(sheet, family=family, section=args.section)
+            fields = [
+                f"PDF {sheet.pdf_page if sheet.pdf_page is not None else '-'}",
+                sheet.sheet_number or "[unidentified]",
+                sheet.sheet_subject.value,
+            ]
+            if sheet.level:
+                fields.append(sheet.level)
+            if sheet.segment:
+                fields.append(f"SEGMENT {sheet.segment}")
+            if sheet.area:
+                fields.append(",".join(sheet.area))
+            print(" | ".join(fields))
+            print(
+                f"  detections={len(detections)} | "
+                f"unique_sections={len({item.normalized_section for item in detections})}"
+            )
+            counts = Counter(item.normalized_section for item in detections)
+            if counts:
+                print("  " + " | ".join(f"{key}={value}" for key, value in counts.most_common()))
+            if args.detections:
+                for detection in detections:
+                    print(
+                        f"  PDF {detection.pdf_page} | {detection.normalized_section} | "
+                        f"x={detection.raw_x:.2f} y={detection.raw_y:.2f} "
+                        f"w={detection.raw_width:.2f} h={detection.raw_height:.2f} | "
+                        f"copies={detection.duplicate_count}"
+                    )
+    elif active_filters:
+        print("\nNo sheets matched the selected filters.")
+
+    if args.debug:
+        print("\nInventory diagnostics:")
+        print(f"Package-index records used: {len(displayed)}")
+        extraction_pages = sorted({page for sheet in displayed for page in sheet.pdf_pages})
+        print(
+            "Detection extraction pages used: "
+            + (", ".join(str(page) for page in extraction_pages) or "none")
+        )
+        for sheet in displayed:
+            print(
+                f"{sheet.sheet_number or '[unidentified]'} | raw={sheet.raw_detection_count} | "
+                f"deduplicated={sheet.deduplicated_detection_count} | "
+                f"families={sheet.counts_by_family} | sections={sheet.counts_by_section}"
+            )
+            for warning in sheet.warnings:
+                print(f"Sheet warning: {warning}")
+        print(f"Duplicate records suppressed: {result.duplicate_suppression_count}")
+        print(f"Unmatched or ambiguous detections: {result.unmatched_detection_count}")
+        print(f"Applied filters: {_format_filters(active_filters) if active_filters else 'none'}")
+        for warning in result.warnings:
+            print(f"Warning: {warning}")
+    if args.csv:
+        print(f"CSV export: {csv_rows} detection rows written to {args.csv}")
+    return 0
+
+
+def _inventory_sheet_payload(sheet, family, section):
+    payload = sheet.to_dict()
+    detections = matching_detections(sheet, family=family, section=section)
+    payload["detections"] = [item.to_dict() for item in detections]
+    payload["matched_detection_count"] = len(detections)
+    return payload
+
+
 def _print_counts(label: str, values) -> None:
     print(f"\n{label}:")
     if not values:
@@ -560,6 +747,30 @@ def _active_index_filters(args: argparse.Namespace) -> Dict[str, object]:
     return {key: value for key, value in values.items() if value is not None}
 
 
+def _active_inventory_filters(args: argparse.Namespace) -> Dict[str, object]:
+    values = {
+        "sheet": args.sheet,
+        "page": args.page,
+        "kind": args.kind,
+        "subject": args.subject,
+        "level": args.level,
+        "segment": args.segment,
+        "area": args.area,
+        "family": args.family,
+        "section": args.section,
+        "with-detections": True if args.with_detections else None,
+        "without-detections": True if args.without_detections else None,
+    }
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _format_filters(filters: Dict[str, object]) -> str:
+    return ", ".join(
+        f"{key}={str(value).lower() if isinstance(value, bool) else value}"
+        for key, value in filters.items()
+    )
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "inspect":
@@ -574,7 +785,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_title_blocks(args)
     if args.command == "reconcile-sheets":
         return _run_reconcile_sheets(args)
-    return _run_package_index(args)
+    if args.command == "package-index":
+        return _run_package_index(args)
+    return _run_section_inventory(args)
 
 
 if __name__ == "__main__":
