@@ -553,6 +553,42 @@ detector returns the strongest spatial grid system and warns about close
 alternatives; it does not process all 92 sheets by default, use OCR, or claim
 that every architectural offset grid will be resolved.
 
+## Grid-relative section localization
+
+`grid-locate-sections` places existing, positioned section-label annotations
+relative to the accepted axes on one selected sheet. The annotation anchor is
+the center of its original bounding box; raw X, Y, width, and height remain
+unchanged in the result. Axes are ordered by page coordinate rather than by
+their alphabetic or numeric labels. Signed distances are `anchor - axis` in
+the page's recorded PDF coordinate units.
+
+An annotation is inside the dominant grid only when its anchor lies between
+both axis families and within accepted axis extents in both dimensions. Bay
+names come from the spatially surrounding axes. Points within 6 PDF units of
+an axis are reported explicitly as `ON <label>` and are not counted as
+complete bays. Confidence is a deterministic rule-strength score built from
+grid confidence, available axis families, extent containment, complete
+surrounding intervals, on-axis evidence, and ambiguity penalties; it is not a
+statistical probability.
+
+```bash
+python -m shoplens.cli grid-locate-sections \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --sheet S1-20A --list
+python -m shoplens.cli grid-locate-sections \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --sheet S1-20A --section W24X55 --detections
+python -m shoplens.cli grid-locate-sections \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --sheet S1-20A --svg /tmp/shoplens-grid-sections-S1-20A.svg
+```
+
+The command defaults to the inventory's deduplicated records and supports
+`--raw`, `--family`, `--section`, `--inside-only`, `--outside-only`, and
+`--ambiguous-only`. JSON retains the selected record mode and active filters.
+The SVG contains only grid geometry and annotation text. Localization does not
+associate an annotation with a beam, column, joist, or other physical member.
+
 ## Tests
 
 Run the ShopLens unit tests without drawings:
@@ -611,9 +647,10 @@ cargo build --release
   Unusual forms such as 3D views may remain unknown until a reusable taxonomy rule
   is justified. A title that names multiple levels produces `LEVEL_CONFLICT`
   instead of an arbitrary primary level.
-- Section inventory is label-based. It does not associate text with drawn member
-  lines, grids, beams, columns, schedules, or physical quantities, and it does not
-  compare structural sheets with shop drawings.
+- Section inventory remains label-based. Grid-relative localization can describe
+  where an annotation lies, but it does not associate that annotation with drawn
+  member lines, beams, columns, schedules, or physical quantities, and it does
+  not compare structural sheets with shop drawings.
 - Continuation without repeated headers is limited to the page immediately
   following a confirmed list page inside the selected range. Complex wrapped
   multi-line titles may require future row-continuation logic.
