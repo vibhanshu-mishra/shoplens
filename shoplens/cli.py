@@ -29,6 +29,8 @@ from shoplens.inventory import (
     filter_inventory_sheets,
     matching_detections,
 )
+from shoplens.geometry import extract_page_geometry
+from shoplens.grids import detect_grid_system, export_grid_svg
 from shoplens.models import SectionFamily, SteelLabel, TextDiagnostic
 from shoplens.reporting import (
     build_summary,
@@ -183,6 +185,18 @@ def _parser() -> argparse.ArgumentParser:
     presence = inventory_parser.add_mutually_exclusive_group()
     presence.add_argument("--with-detections", action="store_true")
     presence.add_argument("--without-detections", action="store_true")
+
+    grid_parser = subparsers.add_parser(
+        "grid-system", help="extract the dominant grid system from one plan sheet"
+    )
+    grid_parser.add_argument("pdf", type=Path)
+    grid_selector = grid_parser.add_mutually_exclusive_group(required=True)
+    grid_selector.add_argument("--sheet", help="select a reconciled sheet number")
+    grid_selector.add_argument("--page", type=_one_based_page, help="select a one-based PDF page")
+    grid_parser.add_argument("--list", action="store_true", help="list detected grid axes")
+    grid_parser.add_argument("--json", action="store_true", help="output structured JSON")
+    grid_parser.add_argument("--debug", action="store_true", help="show candidate and geometry evidence")
+    grid_parser.add_argument("--svg", type=Path, help="write a geometry-only diagnostic SVG")
     return parser
 
 
@@ -716,6 +730,88 @@ def _run_section_inventory(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_grid_system(args: argparse.Namespace) -> int:
+    declared, actual, items, status = _extract_package_title_blocks_with_items(args.pdf)
+    if declared is None or actual is None or items is None:
+        return status
+    package = build_package_index(reconcile_sheets(declared, actual))
+    selected = None
+    if args.sheet:
+        normalized = args.sheet.strip().upper()
+        selected = next((sheet for sheet in package.sheets if sheet.sheet_number == normalized), None)
+        if selected is None:
+            print(f"Error: sheet {normalized} was not found in the package index.", file=sys.stderr)
+            return 7
+        page = selected.pdf_page
+    else:
+        page = args.page
+        selected = next((sheet for sheet in package.sheets if page in sheet.actual_pdf_pages), None)
+    if page is None:
+        print("Error: the selected sheet has no reconciled PDF page.", file=sys.stderr)
+        return 7
+    page_items = [item for item in items if int(item.page) == page]
+    try:
+        geometry = extract_page_geometry(args.pdf, [page], page_items)[0]
+    except (OSError, RuntimeError, ValueError, IndexError) as exc:
+        print(f"Error: could not extract page geometry: {exc}", file=sys.stderr)
+        return 8
+    grid = detect_grid_system(str(args.pdf), geometry, page_items, selected)
+    if args.svg:
+        try:
+            export_grid_svg(args.svg, grid, include_rejected=args.debug)
+        except OSError as exc:
+            print(f"Error: could not write SVG: {exc}", file=sys.stderr)
+            return 9
+    if args.json:
+        payload = grid.to_dict()
+        if args.svg:
+            payload["svg_export"] = str(args.svg)
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"Sheet: {grid.sheet_number or '[unidentified]'}")
+    print(f"PDF page: {grid.pdf_page}")
+    print(f"Horizontal grid axes: {len(grid.horizontal_axes)}")
+    print(f"Vertical grid axes: {len(grid.vertical_axes)}")
+    print(f"Unassigned grid labels: {len(grid.unassigned_labels)}")
+    print(f"Rejected candidates: {len(grid.rejected_candidates)}")
+    print(f"Grid confidence: {grid.confidence:.3f}")
+    if args.list:
+        print("\nGrid axes:")
+        for axis in grid.vertical_axes + grid.horizontal_axes:
+            print(
+                f"{axis.orientation.value} | {axis.normalized_label} | "
+                f"{'x' if axis.orientation.value == 'VERTICAL' else 'y'}={axis.coordinate:.2f} | "
+                f"labels={len(axis.label_candidates)} | intersections={axis.intersection_count} | "
+                f"confidence={axis.confidence:.3f}"
+            )
+    if args.debug:
+        print("\nGrid diagnostics:")
+        print(f"Geometry provider: {geometry.provider}")
+        print(f"Page geometry: width={geometry.width:.2f} height={geometry.height:.2f} rotation={geometry.rotation}")
+        print(f"Media box: {geometry.media_box}")
+        print(f"Crop box: {geometry.crop_box}")
+        print(f"Coordinate system: {geometry.coordinate_system}")
+        print(f"Coordinate conversion: {geometry.conversion}")
+        print(f"Line candidates: {len(geometry.lines)}")
+        print(f"Shape candidates: {len(geometry.shapes)}")
+        for axis in grid.vertical_axes + grid.horizontal_axes:
+            print(
+                f"Axis {axis.axis_id} | segments={len(axis.source_segments)} | "
+                f"extent=({axis.start_x:.2f},{axis.start_y:.2f})-({axis.end_x:.2f},{axis.end_y:.2f}) | "
+                f"evidence={','.join(axis.evidence)}"
+            )
+        for label in grid.unassigned_labels:
+            print(f"Unassigned label: {label.normalized_label} at ({label.center_x:.2f},{label.center_y:.2f})")
+        for candidate in grid.rejected_candidates:
+            print(f"Rejected candidate: {candidate.original_text or '[empty]'} | reason={candidate.reason} | x={candidate.x:.2f} y={candidate.y:.2f}")
+        for warning in grid.warnings:
+            print(f"Warning: {warning}")
+    if args.svg:
+        print(f"SVG export: {args.svg}")
+    return 0
+
+
 def _inventory_sheet_payload(sheet, family, section):
     payload = sheet.to_dict()
     detections = matching_detections(sheet, family=family, section=section)
@@ -787,7 +883,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_reconcile_sheets(args)
     if args.command == "package-index":
         return _run_package_index(args)
-    return _run_section_inventory(args)
+    if args.command == "section-inventory":
+        return _run_section_inventory(args)
+    return _run_grid_system(args)
 
 
 if __name__ == "__main__":

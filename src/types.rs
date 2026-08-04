@@ -93,6 +93,22 @@ pub struct PdfRect {
     pub page: u32,
 }
 
+/// Geometry extracted for one PDF page in the same coordinate space as
+/// [`TextItem`], [`PdfLine`], and [`PdfRect`].
+#[derive(Debug, Clone)]
+pub struct PageGeometry {
+    pub page: u32,
+    pub width: f32,
+    pub height: f32,
+    pub rotation: i32,
+    pub media_box: [f32; 4],
+    pub crop_box: [f32; 4],
+    pub coordinate_system: String,
+    pub lines: Vec<PdfLine>,
+    pub rectangles: Vec<PdfRect>,
+    pub warnings: Vec<String>,
+}
+
 /// A text item with position information
 #[derive(Debug, Clone)]
 pub struct TextItem {

@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use std::collections::HashSet;
 
 use crate::detector::PdfType;
-use crate::types::ItemType;
+use crate::types::{ItemType, PageGeometry, PdfLine, PdfRect};
 
 // ---------------------------------------------------------------------------
 // Result wrapper
@@ -273,6 +273,64 @@ pub struct PyTextItem {
     pub item_type: String,
 }
 
+/// A vector line segment in extracted PDF user-space coordinates.
+#[pyclass(name = "GeometryLine")]
+#[derive(Clone)]
+pub struct PyGeometryLine {
+    #[pyo3(get)]
+    pub page: u32,
+    #[pyo3(get)]
+    pub x1: f32,
+    #[pyo3(get)]
+    pub y1: f32,
+    #[pyo3(get)]
+    pub x2: f32,
+    #[pyo3(get)]
+    pub y2: f32,
+}
+
+/// A rectangle emitted by a PDF `re` path operator.
+#[pyclass(name = "GeometryRectangle")]
+#[derive(Clone)]
+pub struct PyGeometryRectangle {
+    #[pyo3(get)]
+    pub page: u32,
+    #[pyo3(get)]
+    pub x: f32,
+    #[pyo3(get)]
+    pub y: f32,
+    #[pyo3(get)]
+    pub width: f32,
+    #[pyo3(get)]
+    pub height: f32,
+}
+
+/// Page boxes and vector geometry in the same coordinates as `TextItem`.
+#[pyclass(name = "PageGeometry")]
+#[derive(Clone)]
+pub struct PyPageGeometry {
+    #[pyo3(get)]
+    pub page: u32,
+    #[pyo3(get)]
+    pub width: f32,
+    #[pyo3(get)]
+    pub height: f32,
+    #[pyo3(get)]
+    pub rotation: i32,
+    #[pyo3(get)]
+    pub media_box: Vec<f32>,
+    #[pyo3(get)]
+    pub crop_box: Vec<f32>,
+    #[pyo3(get)]
+    pub coordinate_system: String,
+    #[pyo3(get)]
+    pub lines: Vec<PyGeometryLine>,
+    #[pyo3(get)]
+    pub rectangles: Vec<PyGeometryRectangle>,
+    #[pyo3(get)]
+    pub warnings: Vec<String>,
+}
+
 #[pymethods]
 impl PyTextItem {
     fn __repr__(&self) -> String {
@@ -538,6 +596,15 @@ fn extract_text_with_positions_bytes(
     Ok(convert_text_items(items))
 }
 
+/// Extract page boxes and vector line/rectangle geometry.
+#[pyfunction]
+#[pyo3(signature = (path, pages=None))]
+fn extract_page_geometry(path: &str, pages: Option<Vec<u32>>) -> PyResult<Vec<PyPageGeometry>> {
+    let page_set = pages.map(|values| values.into_iter().collect::<HashSet<_>>());
+    let geometries = crate::extract_page_geometries(path, page_set.as_ref()).map_err(to_py_err)?;
+    Ok(geometries.into_iter().map(to_py_page_geometry).collect())
+}
+
 /// Extract text within bounding-box regions from a PDF file.
 ///
 /// Args:
@@ -620,6 +687,9 @@ fn pdf_inspector(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPageOcrReasons>()?;
     m.add_class::<PyPdfClassification>()?;
     m.add_class::<PyTextItem>()?;
+    m.add_class::<PyGeometryLine>()?;
+    m.add_class::<PyGeometryRectangle>()?;
+    m.add_class::<PyPageGeometry>()?;
     m.add_class::<PyRegionText>()?;
     m.add_class::<PyPageRegionTexts>()?;
     m.add_class::<PyPageMarkdown>()?;
@@ -634,9 +704,49 @@ fn pdf_inspector(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_text_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(extract_text_with_positions, m)?)?;
     m.add_function(wrap_pyfunction!(extract_text_with_positions_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_page_geometry, m)?)?;
     m.add_function(wrap_pyfunction!(extract_text_in_regions, m)?)?;
     m.add_function(wrap_pyfunction!(extract_text_in_regions_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(extract_pages_markdown, m)?)?;
     m.add_function(wrap_pyfunction!(extract_pages_markdown_bytes, m)?)?;
     Ok(())
+}
+
+fn to_py_page_geometry(value: PageGeometry) -> PyPageGeometry {
+    PyPageGeometry {
+        page: value.page,
+        width: value.width,
+        height: value.height,
+        rotation: value.rotation,
+        media_box: value.media_box.to_vec(),
+        crop_box: value.crop_box.to_vec(),
+        coordinate_system: value.coordinate_system,
+        lines: value.lines.into_iter().map(to_py_geometry_line).collect(),
+        rectangles: value
+            .rectangles
+            .into_iter()
+            .map(to_py_geometry_rectangle)
+            .collect(),
+        warnings: value.warnings,
+    }
+}
+
+fn to_py_geometry_line(value: PdfLine) -> PyGeometryLine {
+    PyGeometryLine {
+        page: value.page,
+        x1: value.x1,
+        y1: value.y1,
+        x2: value.x2,
+        y2: value.y2,
+    }
+}
+
+fn to_py_geometry_rectangle(value: PdfRect) -> PyGeometryRectangle {
+    PyGeometryRectangle {
+        page: value.page,
+        x: value.x,
+        y: value.y,
+        width: value.width,
+        height: value.height,
+    }
 }
