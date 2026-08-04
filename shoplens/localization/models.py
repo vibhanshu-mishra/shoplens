@@ -9,6 +9,28 @@ from shoplens.models import SectionFamily
 
 
 @dataclass(frozen=True)
+class GridPointLocation:
+    x: float
+    y: float
+    nearest_horizontal_axis: Optional[str]
+    nearest_horizontal_distance: Optional[float]
+    nearest_vertical_axis: Optional[str]
+    nearest_vertical_distance: Optional[float]
+    horizontal_interval: Optional[str]
+    vertical_interval: Optional[str]
+    bay_id: Optional[str]
+    inside_grid_bounds: bool
+    on_horizontal_axis: bool
+    on_vertical_axis: bool
+
+    @property
+    def display(self) -> str:
+        if self.bay_id:
+            return self.bay_id
+        return "outside grid" if not self.inside_grid_bounds else "incomplete grid location"
+
+
+@dataclass(frozen=True)
 class GridRelativeSectionDetection:
     pdf_page: int
     sheet_number: Optional[str]
