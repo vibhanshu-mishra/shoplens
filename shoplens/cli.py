@@ -31,6 +31,12 @@ from shoplens.inventory import (
 )
 from shoplens.geometry import extract_page_geometry
 from shoplens.grids import detect_grid_system, export_grid_svg
+from shoplens.localization import (
+    export_localization_svg,
+    filter_localizations,
+    localize_section_detections,
+    with_filtered_detections,
+)
 from shoplens.models import SectionFamily, SteelLabel, TextDiagnostic
 from shoplens.reporting import (
     build_summary,
@@ -197,6 +203,28 @@ def _parser() -> argparse.ArgumentParser:
     grid_parser.add_argument("--json", action="store_true", help="output structured JSON")
     grid_parser.add_argument("--debug", action="store_true", help="show candidate and geometry evidence")
     grid_parser.add_argument("--svg", type=Path, help="write a geometry-only diagnostic SVG")
+
+    locate_parser = subparsers.add_parser(
+        "grid-locate-sections", help="locate section annotations relative to one sheet's grid"
+    )
+    locate_parser.add_argument("pdf", type=Path)
+    locate_selector = locate_parser.add_mutually_exclusive_group(required=True)
+    locate_selector.add_argument("--sheet", help="select a reconciled sheet number")
+    locate_selector.add_argument("--page", type=_one_based_page, help="select a one-based PDF page")
+    locate_parser.add_argument("--list", action="store_true", help="summarize sections by grid bay")
+    locate_parser.add_argument("--detections", action="store_true", help="show every positioned localization")
+    locate_parser.add_argument("--json", action="store_true", help="output structured JSON")
+    locate_parser.add_argument("--debug", action="store_true", help="show confidence evidence and warnings")
+    locate_parser.add_argument("--raw", action="store_true", help="use every accepted source detection")
+    locate_parser.add_argument(
+        "--family", choices=[value.value for value in SectionFamily if value is not SectionFamily.UNKNOWN]
+    )
+    locate_parser.add_argument("--section", help="filter by normalized steel section")
+    location = locate_parser.add_mutually_exclusive_group()
+    location.add_argument("--inside-only", action="store_true")
+    location.add_argument("--outside-only", action="store_true")
+    locate_parser.add_argument("--ambiguous-only", action="store_true")
+    locate_parser.add_argument("--svg", type=Path, help="write a geometry-only localization SVG")
     return parser
 
 
@@ -812,6 +840,146 @@ def _run_grid_system(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_grid_locate_sections(args: argparse.Namespace) -> int:
+    declared, actual, items, status = _extract_package_title_blocks_with_items(args.pdf)
+    if declared is None or actual is None or items is None:
+        return status
+    package = build_package_index(reconcile_sheets(declared, actual))
+    selected = _selected_package_sheet(package.sheets, args.sheet, args.page)
+    if selected is None:
+        identity = args.sheet.strip().upper() if args.sheet else f"PDF page {args.page}"
+        print(f"Error: {identity} was not found in the package index.", file=sys.stderr)
+        return 7
+    page = selected.pdf_page
+    if page is None:
+        print("Error: the selected sheet has no reconciled PDF page.", file=sys.stderr)
+        return 7
+    raw_detections, _, _ = analyze_positioned_text(items)
+    inventory = build_section_inventory(package, raw_detections, raw=args.raw)
+    sheet_inventory = next(
+        (sheet for sheet in inventory.sheets if sheet.sheet_number == selected.sheet_number and page in sheet.pdf_pages),
+        None,
+    )
+    if sheet_inventory is None:
+        print("Error: the selected sheet could not be joined to section detections.", file=sys.stderr)
+        return 7
+    page_items = [item for item in items if int(item.page) == page]
+    try:
+        geometry = extract_page_geometry(args.pdf, [page], page_items)[0]
+    except (OSError, RuntimeError, ValueError, IndexError) as exc:
+        print(f"Error: could not extract page geometry: {exc}", file=sys.stderr)
+        return 8
+    grid = detect_grid_system(str(args.pdf), geometry, page_items, selected)
+    result = localize_section_detections(
+        str(args.pdf), sheet_inventory.detections, grid, record_mode=inventory.record_mode
+    )
+    family = SectionFamily(args.family) if args.family else None
+    displayed = filter_localizations(
+        result.detections, family=family, section=args.section,
+        inside_only=args.inside_only, outside_only=args.outside_only,
+        ambiguous_only=args.ambiguous_only,
+    )
+    detection_filters = {
+        key: value for key, value in {
+            "family": args.family, "section": args.section,
+            "inside-only": True if args.inside_only else None,
+            "outside-only": True if args.outside_only else None,
+            "ambiguous-only": True if args.ambiguous_only else None,
+        }.items() if value is not None
+    }
+    active_filters = {
+        key: value for key, value in {
+            "sheet": args.sheet.strip().upper() if args.sheet else None,
+            "page": args.page,
+            **detection_filters,
+        }.items() if value is not None
+    }
+    output_result = with_filtered_detections(result, displayed, active_filters)
+    if args.svg:
+        try:
+            export_localization_svg(args.svg, output_result)
+        except (OSError, ValueError) as exc:
+            print(f"Error: could not write SVG: {exc}", file=sys.stderr)
+            return 9
+    if args.json:
+        payload = output_result.to_dict()
+        payload["filtered_detection_count"] = len(displayed)
+        payload["raw_mode"] = args.raw
+        if args.svg:
+            payload["svg_export"] = str(args.svg)
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"Sheet: {result.sheet_number or '[unidentified]'}")
+    print(f"PDF page: {result.pdf_page}")
+    print(f"Grid axes: {len(grid.horizontal_axes)} horizontal, {len(grid.vertical_axes)} vertical")
+    print(f"Section detections: {result.total_section_detections}")
+    print(f"Localized detections: {result.localized_detection_count}")
+    print(f"Complete grid bays: {result.detections_with_complete_bay}")
+    print(f"On axes: {result.detections_on_axes}")
+    print(f"Inside grid: {result.inside_grid_count}")
+    print(f"Outside grid: {result.outside_grid_count}")
+    print(f"Ambiguous: {result.ambiguous_detection_count}")
+    print(f"Record mode: {result.record_mode}")
+    if detection_filters:
+        print(f"Matching detections: {len(displayed)}")
+        print(f"Active filters: {_format_filters(detection_filters)}")
+    if args.list:
+        _print_localization_groups(displayed)
+    if args.detections:
+        print("\nSection localizations:")
+        for item in displayed:
+            nearest = f"{item.nearest_vertical_axis or '-'}, {item.nearest_horizontal_axis or '-'}"
+            print(
+                f"{item.normalized_section} | x={item.detection_anchor_x:.2f} | "
+                f"y={item.detection_anchor_y:.2f} | bay={item.bay_id or _location_label(item)} | "
+                f"nearest={nearest} | confidence={item.localization_confidence:.3f}"
+            )
+    if args.debug:
+        print("\nLocalization diagnostics:")
+        print(f"Coordinate system: {geometry.coordinate_system}")
+        print("Detection anchor: bounding-box center")
+        print("Signed distance: anchor coordinate minus axis coordinate, in PDF coordinate units")
+        for item in displayed:
+            print(
+                f"{item.normalized_section} @ ({item.detection_anchor_x:.2f},{item.detection_anchor_y:.2f}) | "
+                f"evidence={','.join(item.evidence) or '-'} | warnings={','.join(item.warnings) or '-'}"
+            )
+        for warning in result.warnings:
+            print(f"Warning: {warning}")
+    if args.svg:
+        print(f"SVG export: {args.svg}")
+    return 0
+
+
+def _selected_package_sheet(sheets, sheet_number, page):
+    if sheet_number:
+        normalized = sheet_number.strip().upper()
+        return next((sheet for sheet in sheets if sheet.sheet_number == normalized), None)
+    return next((sheet for sheet in sheets if page in sheet.actual_pdf_pages), None)
+
+
+def _location_label(item) -> str:
+    if item.vertical_interval and item.horizontal_interval:
+        return f"{item.vertical_interval} / {item.horizontal_interval}"
+    return "outside grid" if not item.inside_grid_bounds else "incomplete bay"
+
+
+def _print_localization_groups(detections) -> None:
+    print("\nSection locations:")
+    if not detections:
+        print("No section detections matched the selected filters.")
+        return
+    by_section = {}
+    for item in detections:
+        by_section.setdefault(item.normalized_section, Counter())[_location_label(item)] += 1
+    for section in sorted(by_section):
+        counts = by_section[section]
+        print(f"{section} | count={sum(counts.values())}")
+        for location, count in counts.most_common():
+            print(f"  {location}: {count}")
+
+
 def _inventory_sheet_payload(sheet, family, section):
     payload = sheet.to_dict()
     detections = matching_detections(sheet, family=family, section=section)
@@ -885,7 +1053,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_package_index(args)
     if args.command == "section-inventory":
         return _run_section_inventory(args)
-    return _run_grid_system(args)
+    if args.command == "grid-system":
+        return _run_grid_system(args)
+    return _run_grid_locate_sections(args)
 
 
 if __name__ == "__main__":
