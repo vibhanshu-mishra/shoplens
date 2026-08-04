@@ -589,6 +589,57 @@ The command defaults to the inventory's deduplicated records and supports
 The SVG contains only grid geometry and annotation text. Localization does not
 associate an annotation with a beam, column, joist, or other physical member.
 
+## Member-line candidates
+
+`member-line-candidates` reviews existing PDF vector segments inside one
+selected framing plan. Its output deliberately uses the term
+`MEMBER_LINE_CANDIDATE`: a line is not identified as a beam, joist, brace,
+column, wall, or other confirmed member.
+
+The dominant plan region is the rectangle between the outer accepted grid
+coordinates, with a documented margin equal to 3% of the page's shorter
+dimension. Both endpoints must fall inside that expanded region. Exact and
+reversed duplicates are suppressed only when endpoints, line width, dash
+pattern, and geometry source agree within small tolerances. Collinear segments
+merge only when orientation, offset, width, dash style, source, and endpoint
+gap are compatible; small gaps at accepted grid intersections remain split.
+
+Before scoring, ShopLens rejects accepted grid-axis geometry, page borders,
+geometry outside the plan region, deterministic dimension lines with
+perpendicular endpoint ticks, short bent leaders terminating near text, and
+insignificant segments. Outside-plan density and position distinguish likely
+schedules, title blocks, and detail borders. Remaining candidates gain
+rule-strength from plan containment, substantial length, grid-adjacent
+endpoints, crossed grids, collinear-chain evidence, and plausible orientation.
+Confidence is explainable rule strength, not probability.
+
+Accounting is reported at three distinct stages. Raw segments reconcile as
+duplicates suppressed plus unique segments evaluated. Unique segments reconcile
+as primitive rejections plus segments entering chain construction. Evaluated
+chains reconcile as accepted member-line candidates plus rejected chains. A
+chain may contain multiple source segments, so segments entering construction
+do not generally equal the number of evaluated chains. In JSON,
+`rejected_candidate_count` is retained for compatibility but is deprecated: it
+combines duplicate-suppression records, primitive-stage rejection records, and
+chain-stage rejection records. Consumers should use the stage-specific counts.
+
+```bash
+python -m shoplens.cli member-line-candidates \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --sheet S1-20A --list
+python -m shoplens.cli member-line-candidates \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --sheet S1-20A --orientation HORIZONTAL --min-confidence 0.80
+python -m shoplens.cli member-line-candidates \
+  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+  --sheet S1-20A --svg /tmp/shoplens-member-lines-S1-20A.svg
+```
+
+The SVG contains page, plan-region, grid, candidate, endpoint, and ID geometry
+only. `--include-rejected` or `--debug` adds rejected geometry to the overlay
+and structured output. No confidential PDF page image is embedded, and nearby
+section labels are not associated with candidates.
+
 ## Tests
 
 Run the ShopLens unit tests without drawings:

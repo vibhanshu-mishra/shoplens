@@ -37,6 +37,12 @@ from shoplens.localization import (
     localize_section_detections,
     with_filtered_detections,
 )
+from shoplens.members import (
+    LineOrientation,
+    detect_member_line_candidates,
+    export_member_candidates_svg,
+    filter_member_candidates,
+)
 from shoplens.models import SectionFamily, SteelLabel, TextDiagnostic
 from shoplens.reporting import (
     build_summary,
@@ -102,6 +108,13 @@ def _one_based_page(value: str) -> int:
     if page < 1:
         raise argparse.ArgumentTypeError("page must be 1 or greater")
     return page
+
+
+def _confidence_value(value: str) -> float:
+    confidence = float(value)
+    if not 0.0 <= confidence <= 1.0:
+        raise argparse.ArgumentTypeError("confidence must be between 0 and 1")
+    return confidence
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -225,6 +238,25 @@ def _parser() -> argparse.ArgumentParser:
     location.add_argument("--outside-only", action="store_true")
     locate_parser.add_argument("--ambiguous-only", action="store_true")
     locate_parser.add_argument("--svg", type=Path, help="write a geometry-only localization SVG")
+
+    member_parser = subparsers.add_parser(
+        "member-line-candidates", help="extract conservative non-grid linear candidates"
+    )
+    member_parser.add_argument("pdf", type=Path)
+    member_selector = member_parser.add_mutually_exclusive_group(required=True)
+    member_selector.add_argument("--sheet", help="select a reconciled sheet number")
+    member_selector.add_argument("--page", type=_one_based_page, help="select a one-based PDF page")
+    member_parser.add_argument("--list", action="store_true", help="list accepted candidates")
+    member_parser.add_argument("--json", action="store_true", help="output structured JSON")
+    member_parser.add_argument("--debug", action="store_true", help="show scoring and rejection evidence")
+    member_parser.add_argument("--svg", type=Path, help="write a geometry-only diagnostic SVG")
+    member_parser.add_argument(
+        "--orientation", choices=[value.value for value in LineOrientation if value is not LineOrientation.OTHER]
+    )
+    member_parser.add_argument("--inside-only", action="store_true")
+    member_parser.add_argument("--min-confidence", type=_confidence_value, default=0.0)
+    member_parser.add_argument("--include-rejected", action="store_true")
+    member_parser.add_argument("--candidate", help="show one candidate ID")
     return parser
 
 
@@ -980,6 +1012,149 @@ def _print_localization_groups(detections) -> None:
             print(f"  {location}: {count}")
 
 
+def _run_member_line_candidates(args: argparse.Namespace) -> int:
+    declared, actual, items, status = _extract_package_title_blocks_with_items(args.pdf)
+    if declared is None or actual is None or items is None:
+        return status
+    package = build_package_index(reconcile_sheets(declared, actual))
+    selected = _selected_package_sheet(package.sheets, args.sheet, args.page)
+    if selected is None:
+        identity = args.sheet.strip().upper() if args.sheet else f"PDF page {args.page}"
+        print(f"Error: {identity} was not found in the package index.", file=sys.stderr)
+        return 7
+    page = selected.pdf_page
+    if page is None:
+        print("Error: the selected sheet has no reconciled PDF page.", file=sys.stderr)
+        return 7
+    page_items = [item for item in items if int(item.page) == page]
+    try:
+        geometry = extract_page_geometry(args.pdf, [page], page_items)[0]
+    except (OSError, RuntimeError, ValueError, IndexError) as exc:
+        print(f"Error: could not extract page geometry: {exc}", file=sys.stderr)
+        return 8
+    grid = detect_grid_system(str(args.pdf), geometry, page_items, selected)
+    result = detect_member_line_candidates(str(args.pdf), geometry, grid, page_items, selected)
+    orientation = LineOrientation(args.orientation) if args.orientation else None
+    displayed = filter_member_candidates(
+        result.candidates, orientation, args.inside_only, args.min_confidence, args.candidate
+    )
+    active_filters = {
+        key: value for key, value in {
+            "sheet": args.sheet.strip().upper() if args.sheet else None,
+            "page": args.page,
+            "orientation": args.orientation,
+            "inside-only": True if args.inside_only else None,
+            "min-confidence": args.min_confidence if args.min_confidence else None,
+            "candidate": args.candidate.strip().upper() if args.candidate else None,
+        }.items() if value is not None
+    }
+    result.active_filters = active_filters
+    if args.svg:
+        try:
+            export_member_candidates_svg(
+                args.svg, result, displayed, include_rejected=args.include_rejected or args.debug
+            )
+        except OSError as exc:
+            print(f"Error: could not write SVG: {exc}", file=sys.stderr)
+            return 9
+    if args.json:
+        payload = result.to_dict(include_rejected=args.include_rejected or args.debug)
+        payload["candidates"] = [item.to_dict() for item in displayed]
+        payload["filtered_candidate_count"] = len(displayed)
+        if args.svg:
+            payload["svg_export"] = str(args.svg)
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    by_orientation = Counter(item.orientation_class.value for item in displayed)
+    grid_to_grid = sum(_grid_endpoint_count(item) == 2 for item in displayed)
+    one_end = sum(_grid_endpoint_count(item) == 1 for item in displayed)
+    print(f"Sheet: {result.sheet_number or '[unidentified]'}")
+    print(f"PDF page: {result.pdf_page}")
+    print(f"Raw vector segments: {result.raw_segment_count}")
+    print(f"Duplicate segments suppressed: {result.duplicate_segment_count}")
+    print(f"Unique segments evaluated: {result.deduplicated_segment_count}")
+    print(
+        "Primitive segments rejected before merging: "
+        f"{result.primitive_segments_rejected_count}"
+    )
+    print(
+        "Segments entering chain construction: "
+        f"{result.primitive_segments_entering_merge_count}"
+    )
+    print(f"Merged chains evaluated: {result.merged_chain_count}")
+    print(f"Accepted member-line candidates: {result.accepted_candidate_count}")
+    print(f"Rejected chains: {result.rejected_chain_count}")
+    print(f"Displayed candidates: {len(displayed)}")
+    print("\nBy orientation:")
+    for value in ("HORIZONTAL", "VERTICAL", "DIAGONAL", "OTHER"):
+        print(f"{value}: {by_orientation[value]}")
+    print("\nBy grid relationship:")
+    print(f"Grid-to-grid candidates: {grid_to_grid}")
+    print(f"One-end-at-grid candidates: {one_end}")
+    print(f"Inside-grid candidates: {sum(item.inside_dominant_grid for item in displayed)}")
+    print(f"Outside-grid candidates: {sum(not item.inside_dominant_grid for item in displayed)}")
+    print("\nConfidence distribution:")
+    print(f"High (>=0.80): {sum(item.confidence >= 0.80 for item in displayed)}")
+    print(f"Medium (0.65-0.79): {sum(0.65 <= item.confidence < 0.80 for item in displayed)}")
+    print(f"Low (<0.65): {sum(item.confidence < 0.65 for item in displayed)}")
+    if args.list:
+        print("\nMember-line candidates:")
+        if not displayed:
+            print("No member-line candidates matched the selected filters.")
+        for item in displayed:
+            location = f"{item.start_grid_location} -> {item.end_grid_location}"
+            print(
+                f"{item.candidate_id} | {item.orientation_class.value} | "
+                f"length={item.length:.2f} | {location} | confidence={item.confidence:.3f}"
+            )
+    if args.debug:
+        print("\nCandidate diagnostics:")
+        print("Stage accounting:")
+        print(
+            "  raw = duplicates + unique: "
+            f"{result.raw_segment_count} = {result.duplicate_segment_count} + "
+            f"{result.deduplicated_segment_count}"
+        )
+        print(
+            "  unique = primitive rejected + entering merge: "
+            f"{result.deduplicated_segment_count} = "
+            f"{result.primitive_segments_rejected_count} + "
+            f"{result.primitive_segments_entering_merge_count}"
+        )
+        print(
+            "  chains = accepted + rejected: "
+            f"{result.merged_chain_count} = {result.accepted_candidate_count} + "
+            f"{result.rejected_chain_count}"
+        )
+        print(f"Plan-region bounds: {result.plan_region_bounds}")
+        print(f"Plan-region margin: {result.plan_region_margin:.2f}")
+        print(f"Coordinate system: {geometry.coordinate_system}")
+        print(f"Coordinate conversion: {geometry.conversion}")
+        for item in displayed:
+            print(
+                f"{item.candidate_id} | sources={item.source_segment_count} | "
+                f"evidence={','.join(item.evidence)} | warnings={','.join(item.warnings) or '-'}"
+            )
+        reasons = Counter(item.rejection_reason for item in result.rejected_candidates)
+        for reason, count in reasons.most_common():
+            print(f"Rejected {reason}: {count}")
+        if args.include_rejected:
+            for item in result.rejected_candidates:
+                print(
+                    f"Rejected geometry | reason={item.rejection_reason} | "
+                    f"({item.start_x:.2f},{item.start_y:.2f})-({item.end_x:.2f},{item.end_y:.2f}) | "
+                    f"evidence={','.join(item.evidence)}"
+                )
+    if args.svg:
+        print(f"SVG export: {args.svg}")
+    return 0
+
+
+def _grid_endpoint_count(item) -> int:
+    return int(item.start_near_grid) + int(item.end_near_grid)
+
+
 def _inventory_sheet_payload(sheet, family, section):
     payload = sheet.to_dict()
     detections = matching_detections(sheet, family=family, section=section)
@@ -1055,7 +1230,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_section_inventory(args)
     if args.command == "grid-system":
         return _run_grid_system(args)
-    return _run_grid_locate_sections(args)
+    if args.command == "grid-locate-sections":
+        return _run_grid_locate_sections(args)
+    return _run_member_line_candidates(args)
 
 
 if __name__ == "__main__":

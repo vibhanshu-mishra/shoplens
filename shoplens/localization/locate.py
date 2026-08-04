@@ -7,7 +7,7 @@ from shoplens.grids.models import GridAxis, GridSystem
 from shoplens.inventory.models import ClassifiedSectionDetection
 from shoplens.models import SectionFamily
 
-from .models import GridRelativeSectionDetection, SheetGridSectionLocalization
+from .models import GridPointLocation, GridRelativeSectionDetection, SheetGridSectionLocalization
 
 ON_AXIS_TOLERANCE = 6.0
 NEAR_INTERSECTION_TOLERANCE = 18.0
@@ -80,6 +80,26 @@ def localize_section_detections(
         detections=localized,
         warnings=warnings,
         record_mode=record_mode,
+    )
+
+
+def locate_point_to_grid(grid: GridSystem, x: float, y: float) -> GridPointLocation:
+    """Describe one raw page-coordinate point relative to a grid system."""
+
+    context = _localization_context([grid], x, y)
+    return GridPointLocation(
+        x=x,
+        y=y,
+        nearest_horizontal_axis=(context.nearest_h.normalized_label if context.nearest_h else None),
+        nearest_horizontal_distance=(y - context.nearest_h.coordinate if context.nearest_h else None),
+        nearest_vertical_axis=(context.nearest_v.normalized_label if context.nearest_v else None),
+        nearest_vertical_distance=(x - context.nearest_v.coordinate if context.nearest_v else None),
+        horizontal_interval=context.horizontal_interval,
+        vertical_interval=context.vertical_interval,
+        bay_id=context.bay_id,
+        inside_grid_bounds=context.inside,
+        on_horizontal_axis=context.on_h,
+        on_vertical_axis=context.on_v,
     )
 
 
