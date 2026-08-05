@@ -640,6 +640,38 @@ only. `--include-rejected` or `--debug` adds rejected geometry to the overlay
 and structured output. No confidential PDF page image is embedded, and nearby
 section labels are not associated with candidates.
 
+## Local validation suite
+
+`validate-suite` discovers PDFs recursively and runs five package-level stages:
+PDF health, Sheet List extraction, title-block extraction, reconciliation, and
+package classification. It deliberately does not run grids, member lines, or
+linear patterns. A `PASS` means the stage executed and met structural output
+checks; extraction and classification stages remain `NOT_REVIEWED` until a
+person validates correctness. An unreviewed pass is never a geometry claim.
+
+```bash
+.venv/bin/python -m shoplens.cli validate-suite \
+  "/path/to/local-evaluation-folder" \
+  --json /tmp/shoplens-validation/current.json \
+  --markdown /tmp/shoplens-validation/current.md \
+  --csv /tmp/shoplens-validation/current.csv
+```
+
+Use `--file NAME`, `--max-files N`, or JSON configuration to select inputs.
+`--compare previous.json` reports regressions, improvements, new packages, and
+removed packages by relative filename. Normal JSON omits absolute local paths;
+`--debug` includes them intentionally. The working tree state and Git revision
+are recorded when Git is available.
+
+Each stage is failure-isolated, so later independent stages still run when
+possible and dependent stages explain why they were skipped. A positive
+`timeout_per_stage` uses the host's monotonic interval timer. This safely records
+timeouts for interruptible Python work on macOS/Unix, but a native parser call
+that does not respond to process signals may still require future subprocess
+isolation. Generated reports default to `/tmp/shoplens-validation/` when output
+paths are omitted and must not be written into the confidential corpus unless
+the user explicitly chooses that location.
+
 ## Tests
 
 Run the ShopLens unit tests without drawings:
