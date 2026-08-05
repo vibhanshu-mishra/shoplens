@@ -58,6 +58,14 @@ from shoplens.title_blocks import (
     extract_title_blocks,
     reconcile_sheets,
 )
+from shoplens.validation import (
+    compare_reports,
+    load_config,
+    run_validation_suite,
+    write_csv as write_validation_csv,
+    write_json as write_validation_json,
+    write_markdown as write_validation_markdown,
+)
 
 
 @dataclass(frozen=True)
@@ -257,6 +265,23 @@ def _parser() -> argparse.ArgumentParser:
     member_parser.add_argument("--min-confidence", type=_confidence_value, default=0.0)
     member_parser.add_argument("--include-rejected", action="store_true")
     member_parser.add_argument("--candidate", help="show one candidate ID")
+
+    validation_parser = subparsers.add_parser(
+        "validate-suite", help="run package-level checks across a local PDF corpus"
+    )
+    validation_parser.add_argument("evaluation_root", type=Path)
+    validation_parser.add_argument("--json", type=Path, help="write a structured JSON report")
+    validation_parser.add_argument("--markdown", type=Path, help="write a Markdown report")
+    validation_parser.add_argument("--csv", type=Path, help="write a package CSV summary")
+    validation_parser.add_argument("--config", type=Path, help="load local JSON configuration")
+    validation_parser.add_argument("--debug", action="store_true", help="include absolute paths in JSON")
+    validation_parser.add_argument("--file", action="append", default=[], help="select a relative file name")
+    validation_parser.add_argument("--max-files", type=int)
+    validation_parser.add_argument("--timeout-per-stage", type=float)
+    validation_parser.add_argument("--stop-on-error", action="store_true")
+    validation_parser.add_argument("--package-only", action="store_true")
+    validation_parser.add_argument("--deep", action="store_true")
+    validation_parser.add_argument("--compare", type=Path, help="compare against prior JSON")
     return parser
 
 
@@ -1210,6 +1235,81 @@ def _format_filters(filters: Dict[str, object]) -> str:
     )
 
 
+def _run_validate_suite(args: argparse.Namespace) -> int:
+    try:
+        config = load_config(args.config)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Error: invalid validation configuration: {exc}", file=sys.stderr)
+        return 2
+    root = args.evaluation_root
+    if not root.exists() or not root.is_dir():
+        print("Error: evaluation root must be an existing directory.", file=sys.stderr)
+        return 2
+    if args.max_files is not None and args.max_files < 0:
+        print("Error: --max-files must be nonnegative.", file=sys.stderr)
+        return 2
+    timeout = args.timeout_per_stage if args.timeout_per_stage is not None else config.timeout_per_stage
+    if timeout is not None and timeout <= 0:
+        print("Error: --timeout-per-stage must be greater than zero.", file=sys.stderr)
+        return 2
+    selected = args.file or config.selected_files
+    max_files = args.max_files if args.max_files is not None else config.max_files
+    result = run_validation_suite(
+        root, include_patterns=config.include_patterns,
+        exclude_patterns=config.exclude_patterns, selected_files=selected,
+        max_files=max_files, timeout_per_stage=timeout, stop_on_error=args.stop_on_error,
+    )
+    if args.deep or config.deep_validation_enabled:
+        result.warnings.append("DEEP_VALIDATION_NOT_IMPLEMENTED_PACKAGE_STAGES_ONLY")
+    if args.compare:
+        try:
+            baseline = json.loads(args.compare.read_text(encoding="utf-8"))
+            result.comparison = compare_reports(result.to_dict(debug=False), baseline)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Error: invalid comparison baseline: {exc}", file=sys.stderr)
+            return 2
+    if not any((args.json, args.markdown, args.csv)):
+        output = Path(config.output_directory)
+        args.json = output / "current.json"
+        args.markdown = output / "current.md"
+        args.csv = output / "current.csv"
+    if args.json:
+        write_validation_json(args.json, result, debug=args.debug)
+    if args.markdown:
+        write_validation_markdown(args.markdown, result)
+    if args.csv:
+        write_validation_csv(args.csv, result)
+    print("ShopLens Validation Suite")
+    print(f"\nEvaluation PDFs: {result.pdf_count}")
+    print(f"Packages passed: {result.packages_passed}")
+    print(f"Packages with warnings: {result.packages_with_warnings}")
+    print(f"Packages failed: {result.packages_failed}")
+    print(f"Total runtime: {result.runtime_seconds:.3f} seconds")
+    for package in result.package_results:
+        print(f"\n{package.overall_status.value} | {package.relative_path}")
+        for stage in package.stages:
+            detail = _validation_stage_detail(stage)
+            print(f"  {stage.stage_name}: {stage.status.value}{detail}")
+        for error in package.errors:
+            print(f"  Error: {error}")
+    for warning in result.warnings:
+        print(f"Warning: {warning}")
+    return 1 if result.packages_failed else 0
+
+
+def _validation_stage_detail(stage) -> str:
+    metrics = stage.metrics
+    if stage.stage_name == "SHEET_LIST" and "declared_sheet_count" in metrics:
+        return f" | {metrics['declared_sheet_count']} declared sheets"
+    if stage.stage_name == "TITLE_BLOCKS" and "page_count" in metrics:
+        return f" | {metrics.get('identified_page_count', 0)}/{metrics['page_count']} identified"
+    if stage.stage_name == "SHEET_RECONCILIATION" and "match_count" in metrics:
+        return f" | {metrics['match_count']} matches"
+    if stage.stage_name == "PACKAGE_CLASSIFICATION" and "classified_sheet_count" in metrics:
+        return f" | {metrics['classified_sheet_count']} classified"
+    return ""
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "inspect":
@@ -1232,6 +1332,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_grid_system(args)
     if args.command == "grid-locate-sections":
         return _run_grid_locate_sections(args)
+    if args.command == "validate-suite":
+        return _run_validate_suite(args)
     return _run_member_line_candidates(args)
 
 

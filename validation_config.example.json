@@ -1,0 +1,10 @@
+{
+  "evaluation_root": "/path/to/local-evaluation-folder",
+  "output_directory": "/tmp/shoplens-validation",
+  "include_patterns": ["*.pdf"],
+  "exclude_patterns": ["archive/*"],
+  "max_files": null,
+  "selected_files": [],
+  "timeout_per_stage": 300,
+  "deep_validation_enabled": false
+}
