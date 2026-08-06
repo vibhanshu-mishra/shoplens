@@ -98,6 +98,7 @@ def classify_entry(entry: ReconciliationEntry) -> ClassifiedSheet:
         group_keys=groups,
         warnings=list(dict.fromkeys(list(entry.warnings) + warnings)),
         candidate_rules=[candidate.rule_id for candidate in candidates],
+        record_source=entry.record_source,
     )
 
 
@@ -128,6 +129,7 @@ def build_package_index(result: ReconciliationResult) -> PackageIndexResult:
         counts_by_area=_count(area for sheet in sheets for area in sheet.area),
         sheets=sheets,
         warnings=list(dict.fromkeys(warnings)),
+        declared_index_status=result.declared_index_status,
     )
 
 

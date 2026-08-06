@@ -12,6 +12,7 @@ class ValidationStatus(str, Enum):
     SKIPPED = "SKIPPED"
     UNREVIEWED = "UNREVIEWED"
     TIMEOUT = "TIMEOUT"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class ReviewStatus(str, Enum):

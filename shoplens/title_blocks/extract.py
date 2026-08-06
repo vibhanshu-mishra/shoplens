@@ -37,7 +37,21 @@ class _Candidate:
     rejected: List[str]
     label: Optional[PositionedText]
     declared_match: bool
+    source_fragments: List[str]
     layout_id: Optional[str] = None
+
+
+@dataclass
+class _JoinedText:
+    text: str
+    page: int
+    x: float
+    y: float
+    width: float
+    height: float
+    font: Optional[str]
+    font_size: float
+    source_fragments: List[str]
 
 
 @dataclass
@@ -85,24 +99,24 @@ def extract_title_blocks(
 
     candidates_by_page: Dict[int, List[_Candidate]] = {}
     for page in page_numbers:
+        page_items = by_page.get(page, [])
         candidates_by_page[page] = _generate_candidates(
-            by_page.get(page, []), declared, text_page_frequency
+            list(page_items) + _join_number_fragments(page_items), declared, text_page_frequency
         )
 
-    seed_candidates = [
-        candidate
-        for values in candidates_by_page.values()
-        for candidate in values
-        if candidate.score >= ACCEPTANCE_SCORE and not candidate.rejected
-    ]
+    seed_candidates = [candidate for values in candidates_by_page.values() for candidate in values]
     layouts = _discover_layouts(seed_candidates)
     for values in candidates_by_page.values():
         for candidate in values:
             layout = _matching_layout(candidate, layouts)
             if layout is not None:
                 candidate.layout_id = layout.layout_id
-                candidate.score = min(1.0, candidate.score + 0.1)
+                layout_bonus = 0.65 if candidate.label is None else 0.1
+                candidate.score = min(1.0, candidate.score + layout_bonus)
                 candidate.reasons.append("RECURRING_LAYOUT_SUPPORT")
+                if "NO_TITLE_BLOCK_LABEL_CONTEXT" in candidate.rejected:
+                    candidate.rejected.remove("NO_TITLE_BLOCK_LABEL_CONTEXT")
+                    candidate.reasons.append("RECURRING_LAYOUT_WITHOUT_LITERAL_LABEL")
                 if (
                     candidate.label is not None
                     and "REPEATED_PROJECT_OR_TEMPLATE_IDENTIFIER" in candidate.rejected
@@ -158,6 +172,27 @@ def normalize_number(value: str) -> str:
     return re.sub(r"\s+", "", value).upper()
 
 
+def _number_profile(value: str) -> Optional[str]:
+    compact = normalize_number(value)
+    if is_sheet_number(compact):
+        return "STRUCTURAL_SHEET_NUMBER"
+    if (
+        8 <= len(compact) <= 40
+        and re.fullmatch(r"(?:[A-Z]{1,4}-)?S[A-Z0-9]+(?:-[A-Z0-9]+){2,}", compact)
+        and sum(char.isdigit() for char in compact) >= 3
+    ):
+        return "CODED_SHEET_NUMBER"
+    if (
+        12 <= len(compact) <= 80
+        and compact.count("-") >= 4
+        and re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+){4,}", compact)
+        and any(char.isalpha() for char in compact)
+        and sum(char.isdigit() for char in compact) >= 2
+    ):
+        return "LONG_DOCUMENT_NUMBER"
+    return None
+
+
 def _generate_candidates(
     items: Sequence[PositionedText],
     declared: Dict[str, SheetEntry],
@@ -168,10 +203,11 @@ def _generate_candidates(
     font_sizes = [float(getattr(item, "font_size", item.height)) for item in items if item.text.strip()]
     typical_font = median(font_sizes) if font_sizes else 10.0
     for item in items:
-        if not is_sheet_number(item.text):
+        profile = _number_profile(item.text)
+        if profile is None:
             continue
         number = normalize_number(item.text)
-        reasons = ["SUPPORTED_SHEET_NUMBER_SYNTAX"]
+        reasons = [profile]
         rejected: List[str] = []
         score = 0.2
         label = _nearest_label(item, labels)
@@ -182,9 +218,11 @@ def _generate_candidates(
             score += 0.15
             reasons.append("DECLARED_LIST_MATCH")
         font_size = float(getattr(item, "font_size", item.height))
-        if font_size >= typical_font * 1.5:
+        if font_size >= typical_font * 1.2:
             score += 0.1
             reasons.append("PROMINENT_FONT")
+        if font_size >= 30.0 and font_size >= typical_font * 1.2:
+            reasons.append("VERY_PROMINENT_FONT")
         if frequency[number] >= 5:
             score -= 0.6
             rejected.append("REPEATED_PROJECT_OR_TEMPLATE_IDENTIFIER")
@@ -203,6 +241,7 @@ def _generate_candidates(
                 rejected=rejected,
                 label=label,
                 declared_match=number in declared,
+                source_fragments=list(getattr(item, "source_fragments", [item.text])),
             )
         )
     return candidates
@@ -211,7 +250,7 @@ def _generate_candidates(
 def _is_sheet_label(value: str) -> bool:
     return bool(
         re.fullmatch(
-            r"\s*(?:SHEET|SHEET\s+NO\.?|SHEET\s+NUMBER|DRAWING\s+NO\.?)\s*",
+            r"\s*(?:SHEET|SHEET\s+NO\.?|SHEET\s+NUMBER|DRAWING\s+NO\.?|DWG\.?\s*NO\.?|DOCUMENT\s+NO\.?)\s*:?\s*",
             value,
             re.IGNORECASE,
         )
@@ -224,7 +263,7 @@ def _nearest_label(
     if not labels:
         return None
     nearest = min(labels, key=lambda label: _distance(item, label))
-    limit = max(120.0, float(item.height) * 5.0)
+    limit = max(240.0, float(item.height) * 12.0)
     return nearest if _distance(item, nearest) <= limit else None
 
 
@@ -234,8 +273,12 @@ def _distance(left: PositionedText, right: PositionedText) -> float:
 
 def _discover_layouts(candidates: Sequence[_Candidate]) -> List[_Layout]:
     groups: List[List[_Candidate]] = []
+    eligible = [
+        candidate for candidate in candidates
+        if candidate.label is not None or "VERY_PROMINENT_FONT" in candidate.reasons
+    ]
     for candidate in sorted(
-        candidates,
+        eligible,
         key=lambda value: (
             float(value.item.width) <= 1.0,
             float(value.item.x),
@@ -260,7 +303,18 @@ def _discover_layouts(candidates: Sequence[_Candidate]) -> List[_Layout]:
             groups.append([candidate])
         else:
             group.append(candidate)
-    recurring = [group for group in groups if len({item.item.page for item in group}) >= 2]
+    recurring = [
+        group for group in groups
+        if len({item.item.page for item in group}) >= 2
+        and (
+            len({item.number for item in group}) >= 2
+            or any(item.label is not None for item in group)
+        )
+        and (
+            any(item.label is not None for item in group)
+            or all("VERY_PROMINENT_FONT" in item.reasons for item in group)
+        )
+    ]
     layouts: List[_Layout] = []
     for index, group in enumerate(recurring, start=1):
         layouts.append(
@@ -301,6 +355,7 @@ def _select_page(
         selected is not None
         and len(viable) > 1
         and selected.score - viable[1].score < AMBIGUITY_MARGIN
+        and (selected.label is None) == (viable[1].label is None)
     )
     debug = {
         "pdf_page": page,
@@ -314,7 +369,9 @@ def _select_page(
             warnings.append("LOW_CONFIDENCE_SHEET_NUMBER")
         return _empty_page(page, len(candidates), warnings), debug
 
-    title_items = _title_fragments(items, selected)
+    title_items = _labeled_title_fragments(items, selected)
+    if not title_items:
+        title_items = _title_fragments(items, selected)
     title = _join_title(title_items, float(selected.item.width) <= 1.0) if title_items else None
     warnings: List[str] = []
     if title is None:
@@ -348,6 +405,8 @@ def _select_page(
             evidence=evidence,
             candidate_count=len(candidates),
             warnings=warnings,
+            number_source_fragments=selected.source_fragments,
+            title_source_fragments=[item.text for item in title_items],
         ),
         debug,
     )
@@ -367,24 +426,70 @@ def _title_fragments(items: Sequence[PositionedText], candidate: _Candidate) -> 
         if rotated:
             in_region = (
                 float(number.x) - height * 8.0 <= float(item.x) <= float(number.x) - height * 2.5
-                and abs(float(item.y) - float(number.y)) <= height * 3.0
+                and abs(float(item.y) - float(number.y)) <= height * 15.0
             )
         else:
+            literal_sheet_layout = bool(
+                candidate.label is not None
+                and re.fullmatch(r"\s*SHEET\s*", candidate.label.text, re.I)
+            )
+            lower_multiplier = 3.0 if literal_sheet_layout else 0.8
             in_region = (
                 abs(float(item.x) - float(candidate.label.x if candidate.label else number.x))
                 <= height * 3.0
-                and float(number.y) + height * 3.0 <= float(item.y) <= float(number.y) + height * 8.0
+                and float(number.y) + height * lower_multiplier
+                <= float(item.y)
+                <= float(number.y) + height * 8.0
             )
         if in_region:
             fragments.append(item)
     return fragments
 
 
+def _labeled_title_fragments(
+    items: Sequence[PositionedText], candidate: _Candidate
+) -> List[PositionedText]:
+    labels = [
+        item for item in items
+        if re.fullmatch(r"\s*(?:TITLE|DRAWING\s+TITLE|SHEET\s+TITLE)\s*:?\s*", item.text, re.I)
+    ]
+    if not labels:
+        return []
+    label = min(labels, key=lambda item: _distance(item, candidate.item))
+    number_height = max(float(candidate.item.height), 1.0)
+    if _distance(label, candidate.item) > max(500.0, number_height * 15.0):
+        return []
+    label_size = float(getattr(label, "font_size", label.height))
+    values = [
+        item for item in items
+        if item is not label
+        and item is not candidate.item
+        and not _excluded_title_text(item.text)
+        and float(getattr(item, "font_size", item.height)) >= label_size * 1.1
+        and _distance(item, label) <= max(450.0, number_height * 14.0)
+    ]
+    if not values:
+        return []
+    nearest = min(values, key=lambda item: _distance(item, label))
+    return [
+        item for item in values
+        if abs(float(item.y) - float(nearest.y)) <= max(float(nearest.height) * 2.0, 40.0)
+    ]
+
+
 def _excluded_title_text(value: str) -> bool:
     compact = re.sub(r"\s+", " ", value).strip().upper()
     return bool(
         not compact
-        or compact in {"SHEET", "JOB", "DATE", "REV", "REVISION", "ISSUES", "REVISIONS"}
+        or compact in {"SHEET", "TITLE", "JOB", "DATE", "REV", "REVISION", "ISSUES", "REVISIONS"}
+        or re.fullmatch(
+            r"(?:SHEET|DRAWING|DWG|DOCUMENT)\s+(?:NUMBER|NO\.?|TITLE)\s*:?",
+            compact,
+        )
+        or re.search(
+            r",\s*(?:ALABAMA|ALASKA|ARIZONA|ARKANSAS|CALIFORNIA|COLORADO|CONNECTICUT|DELAWARE|FLORIDA|GEORGIA|HAWAII|IDAHO|ILLINOIS|INDIANA|IOWA|KANSAS|KENTUCKY|LOUISIANA|MAINE|MARYLAND|MASSACHUSETTS|MICHIGAN|MINNESOTA|MISSISSIPPI|MISSOURI|MONTANA|NEBRASKA|NEVADA|OHIO|OKLAHOMA|OREGON|PENNSYLVANIA|TENNESSEE|TEXAS|UTAH|VERMONT|VIRGINIA|WASHINGTON|WISCONSIN|WYOMING)\b",
+            compact,
+        )
         or re.fullmatch(r"\d{4}[.-]\d{2}[.-]\d{2}", compact)
         or re.fullmatch(r"\d+(?:\.\d+)?", compact)
         or "ISSUE FOR" in compact
@@ -427,6 +532,7 @@ def _candidate_dict(candidate: _Candidate) -> Dict[str, Any]:
         "rejection_reasons": candidate.rejected,
         "declared_match": candidate.declared_match,
         "layout_id": candidate.layout_id,
+        "source_fragments": candidate.source_fragments,
     }
 
 
@@ -471,6 +577,56 @@ def _deduplicate_items(items: Sequence[PositionedText]) -> Tuple[List[Positioned
         else:
             retained.append(item)
     return retained, duplicates
+
+
+def _join_number_fragments(items: Sequence[PositionedText]) -> List[_JoinedText]:
+    """Join only adjacent, font-compatible fragments that form a known number profile."""
+
+    joined: List[_JoinedText] = []
+    for rotated in (False, True):
+        oriented = [item for item in items if (float(item.width) <= 1.0) == rotated]
+        ordered = sorted(
+            oriented,
+            key=(
+                (lambda item: (float(item.x), float(item.y)))
+                if rotated
+                else (lambda item: (float(item.y), float(item.x)))
+            ),
+        )
+        for start in range(len(ordered)):
+            fragments = [ordered[start]]
+            for candidate in ordered[start + 1 : start + 4]:
+                previous = fragments[-1]
+                typical = max(float(previous.height), float(candidate.height), 1.0)
+                same_font = getattr(previous, "font", None) == getattr(candidate, "font", None)
+                if rotated:
+                    aligned = abs(float(previous.x) - float(candidate.x)) <= typical * 0.6
+                    gap = float(candidate.y) - (float(previous.y) + float(previous.height))
+                else:
+                    aligned = abs(float(previous.y) - float(candidate.y)) <= typical * 0.6
+                    gap = float(candidate.x) - (float(previous.x) + float(previous.width))
+                if not same_font or not aligned or not (-typical * 0.25 <= gap <= typical * 1.5):
+                    break
+                fragments.append(candidate)
+                combined = "".join(item.text.strip() for item in fragments)
+                if _number_profile(combined) and not all(
+                    _number_profile(item.text) for item in fragments
+                ):
+                    left, bottom, width, height = _box(fragments)
+                    joined.append(
+                        _JoinedText(
+                            text=combined,
+                            page=int(fragments[0].page),
+                            x=float(left or 0.0),
+                            y=float(bottom or 0.0),
+                            width=float(width or 0.0),
+                            height=float(height or 0.0),
+                            font=getattr(fragments[0], "font", None),
+                            font_size=float(getattr(fragments[0], "font_size", fragments[0].height)),
+                            source_fragments=[item.text for item in fragments],
+                        )
+                    )
+    return joined
 
 
 def _box(items: Sequence[PositionedText]) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:

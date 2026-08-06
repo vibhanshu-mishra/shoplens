@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from shoplens.title_blocks.models import DeclaredIndexStatus, SheetRecordSource
+
 
 class ClassificationTitleSource(str, Enum):
     ACTUAL_TITLE = "ACTUAL_TITLE"
@@ -76,6 +78,7 @@ class ClassifiedSheet:
     group_keys: List[str]
     warnings: List[str]
     candidate_rules: List[str] = field(default_factory=list)
+    record_source: SheetRecordSource = SheetRecordSource.DECLARED_RECONCILIATION
 
     def to_dict(self, include_debug: bool = False) -> Dict[str, Any]:
         result = asdict(self)
@@ -83,6 +86,7 @@ class ClassifiedSheet:
             result[key] = getattr(self, key).value
         result["secondary_kinds"] = [value.value for value in self.secondary_kinds]
         result["secondary_subjects"] = [value.value for value in self.secondary_subjects]
+        result["record_source"] = self.record_source.value
         if not include_debug:
             result.pop("candidate_rules", None)
         return result
@@ -104,9 +108,11 @@ class PackageIndexResult:
     counts_by_area: Dict[str, int]
     sheets: List[ClassifiedSheet]
     warnings: List[str]
+    declared_index_status: DeclaredIndexStatus = DeclaredIndexStatus.AVAILABLE
 
     def to_dict(self, include_debug: bool = False) -> Dict[str, Any]:
         result = asdict(self)
+        result["declared_index_status"] = self.declared_index_status.value
         result["sheets"] = [sheet.to_dict(include_debug=include_debug) for sheet in self.sheets]
         return result
 

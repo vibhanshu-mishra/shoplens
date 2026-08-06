@@ -569,6 +569,7 @@ def _run_reconcile_sheets(args: argparse.Namespace) -> int:
     for entry in result.entries:
         counts[entry.status] += 1
     print(f"Declared sheets: {result.declared_sheet_count}")
+    print(f"Declared index status: {result.declared_index_status.value}")
     print(f"PDF pages processed: {result.total_pdf_pages_processed}")
     print(f"Actual sheets identified: {result.identified_page_count}")
     print(f"Matches: {counts[ReconciliationStatus.MATCH]}")
@@ -576,6 +577,7 @@ def _run_reconcile_sheets(args: argparse.Namespace) -> int:
     print(f"Title mismatches: {counts[ReconciliationStatus.TITLE_MISMATCH]}")
     print(f"Declared but missing: {counts[ReconciliationStatus.DECLARED_BUT_MISSING]}")
     print(f"Present but undeclared: {counts[ReconciliationStatus.PRESENT_BUT_UNDECLARED]}")
+    print(f"Title-block-only index records: {counts[ReconciliationStatus.TITLE_BLOCK_ONLY_INDEX]}")
     print(f"Duplicate sheet numbers: {len(result.duplicate_actual_sheet_numbers)}")
     print(f"Unidentified PDF pages: {len(result.unidentified_pages)}")
     if args.list:

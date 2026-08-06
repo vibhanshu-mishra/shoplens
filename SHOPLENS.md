@@ -240,6 +240,15 @@ at least two pages; its signed raw coordinates are compared with a 60-point
 tolerance. More than one standard or rotated layout can be discovered. Coordinates
 are never converted with `abs()` or tied to an assumed lower-right page corner.
 
+Layout evidence supports labeled fields (`SHEET`, `SHEET NO.`, `DRAWING NO.`,
+`DWG NO.`, and `DOCUMENT NO.`), repeated unlabeled number regions, and standard
+or rotated fields. Sheet-number profiles include compact structural identifiers,
+hyphenated forms, and context-supported coded document numbers. Spatially adjacent,
+font-compatible number fragments may be joined only when the combined value matches
+a supported profile; JSON preserves the source fragments separately. Explicit
+`Title` fields take priority, while repeated nearby multi-line title regions support
+layouts without a title label.
+
 The declared Sheet List is useful supporting evidence, but it is not treated as
 truth by itself. Small references, Sheet List rows, and frequently repeated project
 identifiers are rejected unless independent title-block label and recurring-layout
@@ -282,6 +291,15 @@ Reconciliation uses these statuses:
 - `DUPLICATE_SHEET_NUMBER`: one actual number appears on multiple PDF pages.
 - `UNIDENTIFIED_PAGE`: no reliable candidate exists.
 - `LOW_CONFIDENCE`: a candidate or title exists but evidence is insufficient.
+- `TITLE_BLOCK_ONLY_INDEX`: an actual title block is indexed without claiming it
+  was declared by a Sheet List.
+
+`declared_index_status` distinguishes `AVAILABLE`,
+`PARTIAL_DECLARED_SHEET_LIST`, and `NO_DECLARED_SHEET_LIST`. When there is no
+usable declared index, reconciliation is not applicable, but identified actual
+title blocks are still classified. A partial list preserves declared matches and
+adds other confident actual sheets as `TITLE_BLOCK_ONLY` records instead of
+assuming they are errors.
 
 Title comparison uppercases text, collapses whitespace, normalizes hyphen spacing,
 and compares a small explicit abbreviation vocabulary. The JSON
@@ -671,6 +689,11 @@ that does not respond to process signals may still require future subprocess
 isolation. Generated reports default to `/tmp/shoplens-validation/` when output
 paths are omitted and must not be written into the confidential corpus unless
 the user explicitly chooses that location.
+
+For packages without a usable Sheet List, validation reports reconciliation as
+`NOT_APPLICABLE` and continues classification from confident title-block-only
+records. Title-block failures, unidentified pages, ambiguity, and low confidence
+remain visible; this behavior does not manufacture complete indexes.
 
 ## Tests
 

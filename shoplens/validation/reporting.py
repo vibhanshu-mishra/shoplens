@@ -46,7 +46,10 @@ def write_markdown(path: Path, result: ValidationSuiteResult) -> None:
         )
     lines.extend(["", "## Stage pass rates", ""])
     for name, counts in result.stage_summary.items():
-        successful = counts.get("PASS", 0) + counts.get("PASS_WITH_WARNINGS", 0)
+        successful = (
+            counts.get("PASS", 0) + counts.get("PASS_WITH_WARNINGS", 0)
+            + counts.get("NOT_APPLICABLE", 0)
+        )
         lines.append(f"- {name}: {successful}/{result.pdf_count} completed without failure")
     lines.extend(["", "## Failures and warnings", ""])
     issues = False

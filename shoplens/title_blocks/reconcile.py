@@ -8,9 +8,11 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from shoplens.sheets.models import SheetListResult
 
 from .models import (
+    DeclaredIndexStatus,
     ReconciliationEntry,
     ReconciliationResult,
     ReconciliationStatus,
+    SheetRecordSource,
     TitleBlockPage,
     TitleBlockResult,
 )
@@ -30,6 +32,7 @@ def reconcile_sheets(
 ) -> ReconciliationResult:
     """Create actionable declared-versus-actual reconciliation records."""
 
+    declared_index_status = _declared_index_status(declared, actual)
     actual_by_number: Dict[str, List[TitleBlockPage]] = defaultdict(list)
     for page in actual.pages:
         if page.sheet_number:
@@ -55,6 +58,7 @@ def reconcile_sheets(
                     None,
                     0.0,
                     [],
+                    SheetRecordSource.DECLARED_ONLY,
                 )
             )
             continue
@@ -84,6 +88,7 @@ def reconcile_sheets(
                 similarity,
                 primary.confidence,
                 warnings,
+                SheetRecordSource.DECLARED_RECONCILIATION,
             )
         )
 
@@ -99,10 +104,15 @@ def reconcile_sheets(
                 number,
                 primary.sheet_title,
                 primary.revision,
-                ReconciliationStatus.PRESENT_BUT_UNDECLARED,
+                (
+                    ReconciliationStatus.TITLE_BLOCK_ONLY_INDEX
+                    if declared_index_status != DeclaredIndexStatus.AVAILABLE
+                    else ReconciliationStatus.PRESENT_BUT_UNDECLARED
+                ),
                 None,
                 primary.confidence,
                 list(primary.warnings),
+                SheetRecordSource.TITLE_BLOCK_ONLY,
             )
         )
 
@@ -126,10 +136,21 @@ def reconcile_sheets(
                 None,
                 page.confidence,
                 list(page.warnings),
+                SheetRecordSource.UNIDENTIFIED,
             )
         )
 
-    warnings = list(declared.warnings) + list(actual.warnings)
+    warnings = list(actual.warnings)
+    if declared_index_status == DeclaredIndexStatus.AVAILABLE:
+        warnings.extend(declared.warnings)
+    elif declared_index_status == DeclaredIndexStatus.PARTIAL_DECLARED_SHEET_LIST:
+        warnings.extend(declared.warnings)
+        warnings.append("PARTIAL_DECLARED_SHEET_LIST")
+        warnings.append("TITLE_BLOCK_ONLY_INDEX")
+    else:
+        warnings.append("NO_DECLARED_SHEET_LIST")
+        if actual_by_number:
+            warnings.append("TITLE_BLOCK_ONLY_INDEX")
     return ReconciliationResult(
         source_file=actual.source_file,
         declared_sheet_count=len(declared.entries),
@@ -137,12 +158,31 @@ def reconcile_sheets(
         identified_page_count=actual.identified_page_count,
         unidentified_pages=actual.unidentified_pages,
         missing_declared_sheets=missing,
-        undeclared_actual_sheets=undeclared,
+        undeclared_actual_sheets=(
+            undeclared if declared_index_status == DeclaredIndexStatus.AVAILABLE else []
+        ),
         duplicate_actual_sheet_numbers=actual.duplicate_sheet_numbers,
         title_mismatches=sorted(set(mismatches)),
         entries=entries,
         warnings=list(dict.fromkeys(warnings)),
+        declared_index_status=declared_index_status,
     )
+
+
+def _declared_index_status(
+    declared: SheetListResult, actual: TitleBlockResult
+) -> DeclaredIndexStatus:
+    if not declared.entries:
+        return DeclaredIndexStatus.NO_DECLARED_SHEET_LIST
+    unique_count = len({entry.sheet_number for entry in declared.entries})
+    if declared.declared_total is not None and declared.declared_total != unique_count:
+        return DeclaredIndexStatus.PARTIAL_DECLARED_SHEET_LIST
+    if (
+        actual.identified_page_count > unique_count
+        and unique_count < max(3, actual.total_pdf_pages_processed // 2)
+    ):
+        return DeclaredIndexStatus.PARTIAL_DECLARED_SHEET_LIST
+    return DeclaredIndexStatus.AVAILABLE
 
 
 def compare_titles(
@@ -183,6 +223,7 @@ def _entry(
     similarity: Optional[float],
     confidence: float,
     warnings: List[str],
+    record_source: SheetRecordSource = SheetRecordSource.DECLARED_RECONCILIATION,
 ) -> ReconciliationEntry:
     return ReconciliationEntry(
         declared_sheet_number=declared_number,
@@ -195,4 +236,5 @@ def _entry(
         title_similarity=similarity,
         confidence=confidence,
         warnings=list(dict.fromkeys(warnings)),
+        record_source=record_source,
     )

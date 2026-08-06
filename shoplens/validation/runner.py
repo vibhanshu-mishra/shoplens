@@ -211,7 +211,12 @@ def _run_stage(
         with _timeout(timeout_seconds):
             metrics, output = operation()
         warnings = list(metrics.pop("_warnings", []))
-        status = ValidationStatus.PASS_WITH_WARNINGS if warnings else ValidationStatus.PASS
+        status_override = metrics.pop("_status", None)
+        status = (
+            ValidationStatus(status_override)
+            if status_override is not None
+            else ValidationStatus.PASS_WITH_WARNINGS if warnings else ValidationStatus.PASS
+        )
         return ValidationStageResult(name, status, time.monotonic() - started,
                                      metrics, warnings, [], review), output
     except StageTimeout as exc:
@@ -286,7 +291,11 @@ def _title_blocks(path: Path, context: Dict[str, Any]):
 def _reconciliation(context: Dict[str, Any]):
     result = reconcile_sheets(context["declared"], context["actual"])
     counts = Counter(entry.status.value for entry in result.entries)
-    warnings = list(result.warnings)
+    no_declared_index = result.declared_index_status.value == "NO_DECLARED_SHEET_LIST"
+    warnings = [
+        warning for warning in result.warnings
+        if warning not in {"NO_DECLARED_SHEET_LIST", "TITLE_BLOCK_ONLY_INDEX"}
+    ]
     warning_counts = (
         ("TITLE_MISMATCHES", counts[ReconciliationStatus.TITLE_MISMATCH.value]),
         ("MISSING_DECLARED_SHEETS", len(result.missing_declared_sheets)),
@@ -305,6 +314,11 @@ def _reconciliation(context: Dict[str, Any]):
         "undeclared_sheet_count": len(result.undeclared_actual_sheets),
         "duplicate_sheet_number_count": len(result.duplicate_actual_sheet_numbers),
         "unidentified_page_count": len(result.unidentified_pages),
+        "declared_index_status": result.declared_index_status.value,
+        "title_block_only_sheet_count": sum(
+            entry.record_source.value == "TITLE_BLOCK_ONLY" for entry in result.entries
+        ),
+        "_status": "NOT_APPLICABLE" if no_declared_index else None,
         "_warnings": warnings,
     }, result
 
