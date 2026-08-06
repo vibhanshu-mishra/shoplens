@@ -22,6 +22,7 @@ from shoplens.title_blocks.models import (
     ReconciliationEntry,
     ReconciliationResult,
     ReconciliationStatus,
+    SheetRecordSource,
 )
 
 
@@ -143,6 +144,20 @@ class ClassificationRuleTests(unittest.TestCase):
         self.assertIn("TITLE_SOURCE_MISSING", missing.warnings)
         unknown = classify_entry(entry("S0-10", "UNCLASSIFIED CONTENT"))
         self.assertIn("UNKNOWN_CLASSIFICATION", unknown.warnings)
+
+    def test_title_block_only_record_classifies_from_actual_title(self):
+        source = ReconciliationEntry(
+            declared_sheet_number=None, declared_sheet_title=None,
+            actual_pdf_pages=[1], actual_sheet_number="S-101",
+            actual_sheet_title="FOUNDATION PLAN", revision=None,
+            status=ReconciliationStatus.TITLE_BLOCK_ONLY_INDEX,
+            title_similarity=None, confidence=0.95, warnings=[],
+            record_source=SheetRecordSource.TITLE_BLOCK_ONLY,
+        )
+        result = classify_entry(source)
+        self.assertEqual(result.sheet_kind, SheetKind.PLAN)
+        self.assertEqual(result.record_source, SheetRecordSource.TITLE_BLOCK_ONLY)
+        self.assertEqual(result.classification_title_source, ClassificationTitleSource.ACTUAL_TITLE)
 
     def test_explicit_drawing_views_and_similar_non_view_title(self):
         for title in (

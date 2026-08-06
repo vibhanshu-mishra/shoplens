@@ -2,9 +2,11 @@
 
 from .extract import extract_title_blocks
 from .models import (
+    DeclaredIndexStatus,
     ReconciliationEntry,
     ReconciliationResult,
     ReconciliationStatus,
+    SheetRecordSource,
     TitleBlockPage,
     TitleBlockResult,
 )
@@ -14,6 +16,8 @@ __all__ = [
     "ReconciliationEntry",
     "ReconciliationResult",
     "ReconciliationStatus",
+    "DeclaredIndexStatus",
+    "SheetRecordSource",
     "TitleBlockPage",
     "TitleBlockResult",
     "extract_title_blocks",

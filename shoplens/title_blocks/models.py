@@ -14,6 +14,20 @@ class ReconciliationStatus(str, Enum):
     DUPLICATE_SHEET_NUMBER = "DUPLICATE_SHEET_NUMBER"
     UNIDENTIFIED_PAGE = "UNIDENTIFIED_PAGE"
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
+    TITLE_BLOCK_ONLY_INDEX = "TITLE_BLOCK_ONLY_INDEX"
+
+
+class DeclaredIndexStatus(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    PARTIAL_DECLARED_SHEET_LIST = "PARTIAL_DECLARED_SHEET_LIST"
+    NO_DECLARED_SHEET_LIST = "NO_DECLARED_SHEET_LIST"
+
+
+class SheetRecordSource(str, Enum):
+    DECLARED_RECONCILIATION = "DECLARED_RECONCILIATION"
+    TITLE_BLOCK_ONLY = "TITLE_BLOCK_ONLY"
+    DECLARED_ONLY = "DECLARED_ONLY"
+    UNIDENTIFIED = "UNIDENTIFIED"
 
 
 @dataclass(frozen=True)
@@ -37,6 +51,8 @@ class TitleBlockPage:
     evidence: List[str]
     candidate_count: int
     warnings: List[str]
+    number_source_fragments: List[str] = field(default_factory=list)
+    title_source_fragments: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -75,10 +91,12 @@ class ReconciliationEntry:
     title_similarity: Optional[float]
     confidence: float
     warnings: List[str]
+    record_source: SheetRecordSource = SheetRecordSource.DECLARED_RECONCILIATION
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
         result["status"] = self.status.value
+        result["record_source"] = self.record_source.value
         return result
 
 
@@ -95,8 +113,10 @@ class ReconciliationResult:
     title_mismatches: List[str]
     entries: List[ReconciliationEntry]
     warnings: List[str]
+    declared_index_status: DeclaredIndexStatus = DeclaredIndexStatus.AVAILABLE
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
+        result["declared_index_status"] = self.declared_index_status.value
         result["entries"] = [entry.to_dict() for entry in self.entries]
         return result

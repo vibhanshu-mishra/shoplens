@@ -32,6 +32,7 @@ from shoplens.validation.runner import (
     run_validation_suite,
 )
 from shoplens.title_blocks.models import ReconciliationStatus
+from shoplens.title_blocks.models import DeclaredIndexStatus, SheetRecordSource
 
 
 def stage(name, status=ValidationStatus.PASS, metrics=None, warnings=None, errors=None):
@@ -161,10 +162,14 @@ class DiscoveryAndRunnerTests(unittest.TestCase):
         self.assertIn("LOW_CONFIDENCE_TITLE_BLOCK_PAGES: 1", metrics["_warnings"])
 
         reconciliation = SimpleNamespace(
-            entries=[SimpleNamespace(status=ReconciliationStatus.TITLE_MISMATCH)],
+            entries=[SimpleNamespace(
+                status=ReconciliationStatus.TITLE_MISMATCH,
+                record_source=SheetRecordSource.DECLARED_RECONCILIATION,
+            )],
             declared_sheet_count=1, identified_page_count=0,
             missing_declared_sheets=["S1"], undeclared_actual_sheets=[],
             duplicate_actual_sheet_numbers=[], unidentified_pages=[1], warnings=[],
+            declared_index_status=DeclaredIndexStatus.AVAILABLE,
         )
         with patch("shoplens.validation.runner.reconcile_sheets", return_value=reconciliation):
             metrics, _ = _reconciliation({"declared": object(), "actual": object()})
@@ -185,6 +190,25 @@ class DiscoveryAndRunnerTests(unittest.TestCase):
         self.assertIn("UNKNOWN_SHEET_CLASSIFICATIONS: 1", metrics["_warnings"])
         self.assertIn("LOW_CONFIDENCE_CLASSIFICATIONS: 1", metrics["_warnings"])
         self.assertIn("CLASSIFICATION_CONFLICT_WARNINGS: 1", metrics["_warnings"])
+
+    def test_no_declared_index_is_not_applicable_but_remains_indexable(self):
+        reconciliation = SimpleNamespace(
+            entries=[SimpleNamespace(
+                status=ReconciliationStatus.TITLE_BLOCK_ONLY_INDEX,
+                record_source=SheetRecordSource.TITLE_BLOCK_ONLY,
+            )],
+            declared_sheet_count=0, identified_page_count=1,
+            missing_declared_sheets=[], undeclared_actual_sheets=[],
+            duplicate_actual_sheet_numbers=[], unidentified_pages=[],
+            warnings=["NO_DECLARED_SHEET_LIST", "TITLE_BLOCK_ONLY_INDEX"],
+            declared_index_status=DeclaredIndexStatus.NO_DECLARED_SHEET_LIST,
+        )
+        with patch("shoplens.validation.runner.reconcile_sheets", return_value=reconciliation):
+            metrics, result = _reconciliation({"declared": object(), "actual": object()})
+        self.assertIs(result, reconciliation)
+        self.assertEqual(metrics["_status"], "NOT_APPLICABLE")
+        self.assertEqual(metrics["title_block_only_sheet_count"], 1)
+        self.assertEqual(metrics["_warnings"], [])
 
 
 class ReportingAndComparisonTests(unittest.TestCase):
@@ -230,6 +254,40 @@ class ReportingAndComparisonTests(unittest.TestCase):
             "new.pdf": "NEW_PACKAGE", "recover.pdf": "IMPROVEMENT",
             "regress.pdf": "REGRESSION", "removed.pdf": "REMOVED_PACKAGE",
         })
+
+    def test_objective_improvement_takes_precedence_over_warning_growth(self):
+        baseline = suite([package(
+            "drawing.pdf",
+            stages=[stage("TITLE_BLOCKS", metrics={"identified_page_count": 1})],
+        )]).to_dict()
+        current = suite([package(
+            "drawing.pdf",
+            stages=[stage(
+                "TITLE_BLOCKS",
+                metrics={"identified_page_count": 2},
+                warnings=["LOW_CONFIDENCE_TITLE_BLOCK_PAGES: 1"],
+            )],
+        )]).to_dict()
+
+        change = compare_reports(current, baseline)["package_changes"][0]
+
+        self.assertEqual(change["change"], "IMPROVEMENT")
+        self.assertIn("warning_count", [detail["field"] for detail in change["details"]])
+
+    def test_index_availability_warnings_are_informational(self):
+        baseline = suite([package("drawing.pdf")]).to_dict()
+        current = suite([package(
+            "drawing.pdf",
+            stages=[stage(
+                "PDF_HEALTH",
+                warnings=["NO_DECLARED_SHEET_LIST", "TITLE_BLOCK_ONLY_INDEX"],
+            )],
+        )]).to_dict()
+
+        change = compare_reports(current, baseline)["package_changes"][0]
+
+        self.assertEqual(change["change"], "UNCHANGED")
+        self.assertNotIn("warning_count", [detail["field"] for detail in change["details"]])
 
     def test_config_validation(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -5,7 +5,13 @@ from dataclasses import dataclass
 
 from shoplens.sheets.models import SheetEntry, SheetListResult
 from shoplens.title_blocks import extract_title_blocks, reconcile_sheets
-from shoplens.title_blocks.models import ReconciliationStatus, TitleBlockPage, TitleBlockResult
+from shoplens.title_blocks.models import (
+    DeclaredIndexStatus,
+    ReconciliationStatus,
+    SheetRecordSource,
+    TitleBlockPage,
+    TitleBlockResult,
+)
 from shoplens.title_blocks.reconcile import compare_titles
 
 
@@ -62,6 +68,58 @@ def rotated_block(page, number, title_lines):
 
 
 class TitleBlockExtractionTests(unittest.TestCase):
+    def test_cross_firm_labels_long_numbers_and_fragment_evidence(self):
+        items = [
+            Item("DWG NO.", 1, 900, 80, 70, 19, font_size=19),
+            Item("S-101", 1, 960, 20, 100, 30, font_size=30),
+            Item("FOUNDATION PLAN", 1, 900, 220, 180, 20, font_size=20),
+            Item("DOCUMENT NO.", 2, 900, 80, 100, 19, font_size=19),
+            Item("TX22-AGE-ZZ-ZZ-DR-S-0001", 2, 960, 20, 260, 30, font_size=30),
+            Item("ROOF FRAMING PLAN", 2, 900, 220, 190, 20, font_size=20),
+            Item("DRAWING NO.", 3, 900, 80, 90, 19, font_size=19),
+            Item("SSK-", 3, 960, 20, 48, 30, font_size=30),
+            Item("001", 3, 1010, 20, 42, 30, font_size=30),
+            Item("STRUCTURAL SKETCH", 3, 900, 220, 190, 20, font_size=20),
+        ]
+        result = extract_title_blocks(items, "drawing.pdf", [1, 2, 3])
+        self.assertEqual([page.sheet_number for page in result.pages], [
+            "S-101", "TX22-AGE-ZZ-ZZ-DR-S-0001", "SSK-001",
+        ])
+        self.assertEqual(result.pages[2].number_source_fragments, ["SSK-", "001"])
+
+    def test_recurring_layout_without_literal_sheet_label(self):
+        items = []
+        for page, number, title in (
+            (1, "S001", "GENERAL NOTES"),
+            (2, "S002", "FOUNDATION PLAN"),
+            (3, "S003", "ROOF FRAMING PLAN"),
+        ):
+            items.append(Item(number, page, 900, 20, 100, 30, font_size=30))
+            items.append(Item(title, page, 900, 220, 180, 20, font_size=20))
+        result = extract_title_blocks(items, "drawing.pdf", [1, 2, 3])
+        self.assertEqual(result.identified_page_count, 3)
+        self.assertTrue(all(
+            "RECURRING_LAYOUT_WITHOUT_LITERAL_LABEL" in page.evidence
+            for page in result.pages
+        ))
+
+    def test_explicit_title_field_and_rotated_coded_sheet_number(self):
+        explicit = [
+            Item("Title", 1, 1000, 220, 30, 12, font_size=12),
+            Item("MOMENT FRAME", 1, 820, 190, 180, 19, font_size=19),
+            Item("Sheet", 1, 1000, 125, 40, 12, font_size=12),
+            Item("BS21-02", 1, 850, 95, 150, 37, font_size=37),
+        ]
+        rotated = [
+            Item("Sheet Number", 2, 2020, 2710, 0, 13, font_size=13),
+            Item("S01-30F-P1", 2, 2043, 2895, 0, 16, font_size=16),
+            Item("ROOF FRAMING PLAN", 2, 1968, 2735, 0, 13, font_size=13),
+        ]
+        result = extract_title_blocks(explicit + rotated, "drawing.pdf", [1, 2])
+        self.assertEqual(result.pages[0].sheet_title, "MOMENT FRAME")
+        self.assertEqual(result.pages[1].sheet_number, "S01-30F-P1")
+        self.assertEqual(result.pages[1].sheet_title, "ROOF FRAMING PLAN")
+
     def test_repeated_layout_fragmented_titles_and_declared_matches(self):
         declarations = [declared("S0-00", "GENERAL NOTES"), declared("S1-20A", "FRAMING PLAN-A"), declared("S5-00", "STEEL DETAILS")]
         items = standard_block(1, "S0-00", ["GENERAL NOTES"])
@@ -209,6 +267,53 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(result.undeclared_actual_sheets, ["SSK-001"])
         self.assertEqual(result.title_mismatches, ["S2-00"])
         self.assertEqual(result.to_dict()["entries"][0]["status"], "DUPLICATE_SHEET_NUMBER")
+
+    def test_title_block_only_index_when_declared_list_is_absent(self):
+        declared_result = SheetListResult(
+            source_file="drawing.pdf", pages_scanned=[1], sheet_list_pages=[],
+            entries=[], duplicate_sheet_numbers=[], warnings=["NO_NATIVE_TEXT_SHEET_LIST_FOUND"],
+        )
+        actual_result = TitleBlockResult(
+            source_file="drawing.pdf", total_pdf_pages_processed=2,
+            identified_page_count=2, unidentified_pages=[], low_confidence_pages=[],
+            layouts_discovered=[], duplicate_sheet_numbers={},
+            pages=[
+                title_page(1, "S-101", "FOUNDATION PLAN"),
+                title_page(2, "S-102", "ROOF FRAMING PLAN"),
+            ], warnings=[],
+        )
+        result = reconcile_sheets(declared_result, actual_result)
+        self.assertEqual(result.declared_index_status, DeclaredIndexStatus.NO_DECLARED_SHEET_LIST)
+        self.assertEqual(result.undeclared_actual_sheets, [])
+        self.assertTrue(all(
+            entry.status == ReconciliationStatus.TITLE_BLOCK_ONLY_INDEX
+            and entry.record_source == SheetRecordSource.TITLE_BLOCK_ONLY
+            for entry in result.entries
+        ))
+        self.assertIn("TITLE_BLOCK_ONLY_INDEX", result.warnings)
+
+    def test_declared_total_mismatch_marks_partial_index(self):
+        declared_result = SheetListResult(
+            source_file="drawing.pdf", pages_scanned=[1], sheet_list_pages=[1],
+            entries=[declared("S-101", "FOUNDATION PLAN")],
+            duplicate_sheet_numbers=[], warnings=[], declared_total=2,
+        )
+        actual_result = TitleBlockResult(
+            source_file="drawing.pdf", total_pdf_pages_processed=2,
+            identified_page_count=2, unidentified_pages=[], low_confidence_pages=[],
+            layouts_discovered=[], duplicate_sheet_numbers={},
+            pages=[
+                title_page(1, "S-101", "FOUNDATION PLAN"),
+                title_page(2, "S-102", "ROOF FRAMING PLAN"),
+            ], warnings=[],
+        )
+        result = reconcile_sheets(declared_result, actual_result)
+        self.assertEqual(
+            result.declared_index_status,
+            DeclaredIndexStatus.PARTIAL_DECLARED_SHEET_LIST,
+        )
+        added = next(entry for entry in result.entries if entry.actual_sheet_number == "S-102")
+        self.assertEqual(added.record_source, SheetRecordSource.TITLE_BLOCK_ONLY)
 
 
 if __name__ == "__main__":

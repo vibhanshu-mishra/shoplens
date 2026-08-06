@@ -8,6 +8,11 @@ STAGE_METRICS = {
     "TITLE_BLOCKS": ("identified_page_count",),
     "PACKAGE_CLASSIFICATION": ("unknown_sheet_count",),
 }
+INFORMATIONAL_WARNINGS = {
+    "NO_DECLARED_SHEET_LIST",
+    "PARTIAL_DECLARED_SHEET_LIST",
+    "TITLE_BLOCK_ONLY_INDEX",
+}
 
 
 def compare_reports(current: Dict[str, Any], baseline: Dict[str, Any]) -> Dict[str, Any]:
@@ -29,12 +34,20 @@ def compare_reports(current: Dict[str, Any], baseline: Dict[str, Any]) -> Dict[s
             change = "REGRESSION"
         elif old_failed and not new_failed:
             change = "IMPROVEMENT"
-        elif any(item["direction"] == "REGRESSION" for item in details):
-            change = "REGRESSION"
-        elif any(item["direction"] == "IMPROVEMENT" for item in details):
-            change = "IMPROVEMENT"
         else:
-            change = "UNCHANGED"
+            substantive_regressions = [
+                item for item in details
+                if item["direction"] == "REGRESSION" and item["field"] != "warning_count"
+            ]
+            improvements = [item for item in details if item["direction"] == "IMPROVEMENT"]
+            if substantive_regressions:
+                change = "REGRESSION"
+            elif improvements:
+                change = "IMPROVEMENT"
+            elif any(item["direction"] == "REGRESSION" for item in details):
+                change = "REGRESSION"
+            else:
+                change = "UNCHANGED"
         changes.append({"relative_path": name, "change": change, "details": details})
     counts: Dict[str, int] = {}
     for item in changes:
@@ -46,7 +59,10 @@ def _package_details(now: Dict[str, Any], before: Dict[str, Any]) -> List[Dict[s
     details = []
     current_stages = {stage["stage_name"]: stage for stage in now.get("stages", [])}
     baseline_stages = {stage["stage_name"]: stage for stage in before.get("stages", [])}
-    rank = {"PASS": 0, "PASS_WITH_WARNINGS": 1, "UNREVIEWED": 1, "SKIPPED": 2, "FAIL": 3, "TIMEOUT": 4}
+    rank = {
+        "PASS": 0, "NOT_APPLICABLE": 0, "PASS_WITH_WARNINGS": 1,
+        "UNREVIEWED": 1, "SKIPPED": 2, "FAIL": 3, "TIMEOUT": 4,
+    }
     for name in sorted(set(current_stages) & set(baseline_stages)):
         current_stage, baseline_stage = current_stages[name], baseline_stages[name]
         current_rank = rank.get(current_stage.get("status"), 3)
@@ -72,8 +88,8 @@ def _package_details(now: Dict[str, Any], before: Dict[str, Any]) -> List[Dict[s
             )
             details.append({"field": f"{name}.{metric}", "before": old, "current": new,
                             "direction": "REGRESSION" if regression else "IMPROVEMENT" if improvement else "CHANGE"})
-    old_warnings = sum(len(stage.get("warnings", [])) for stage in before.get("stages", []))
-    new_warnings = sum(len(stage.get("warnings", [])) for stage in now.get("stages", []))
+    old_warnings = _quality_warning_count(before)
+    new_warnings = _quality_warning_count(now)
     if new_warnings != old_warnings:
         details.append({"field": "warning_count", "before": old_warnings, "current": new_warnings,
                         "direction": "REGRESSION" if new_warnings > old_warnings else "IMPROVEMENT"})
@@ -83,3 +99,11 @@ def _package_details(now: Dict[str, Any], before: Dict[str, Any]) -> List[Dict[s
         details.append({"field": "runtime_seconds", "before": old_runtime, "current": new_runtime,
                         "direction": "REGRESSION"})
     return details
+
+
+def _quality_warning_count(package: Dict[str, Any]) -> int:
+    return sum(
+        warning not in INFORMATIONAL_WARNINGS
+        for stage in package.get("stages", [])
+        for warning in stage.get("warnings", [])
+    )
