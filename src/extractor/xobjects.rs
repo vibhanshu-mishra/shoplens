@@ -699,3 +699,159 @@ pub(crate) fn get_form_fonts<'a>(
 
     fonts
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extractor::content_stream::extract_page_text_items;
+    use lopdf::{dictionary, Object, Stream};
+
+    /// Build a minimal legacy Form-XObject document.  The Forms deliberately
+    /// omit `/Resources`; PDF 1.7 permits those resources to be resolved from
+    /// the page that invokes the Form.
+    fn inherited_resource_fixture(nested: bool) -> (Document, ObjectId, ObjectId) {
+        let mut doc = Document::new();
+        let cmap_id = doc.add_object(Object::Stream(Stream::new(
+            dictionary! {},
+            br#"/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+1 begincodespacerange
+<00> <FF>
+endcodespacerange
+1 beginbfchar
+<0D> <0058>
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end"#
+                .to_vec(),
+        )));
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "ToUnicode" => Object::Reference(cmap_id),
+        });
+
+        let text_form_id = doc.add_object(Object::Stream(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "FormType" => 1,
+                "BBox" => vec![0.into(), 0.into(), 200.into(), 200.into()],
+            },
+            b"BT /F1 12 Tf 10 10 Td <0D> Tj ET".to_vec(),
+        )));
+
+        let (entry_form_id, page_content, xobjects) = if nested {
+            let outer_form_id = doc.add_object(Object::Stream(Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "FormType" => 1,
+                    "BBox" => vec![0.into(), 0.into(), 200.into(), 200.into()],
+                },
+                b"q /Inner Do Q".to_vec(),
+            )));
+            (
+                outer_form_id,
+                b"q /Outer Do Q".to_vec(),
+                dictionary! {
+                    "Outer" => Object::Reference(outer_form_id),
+                    "Inner" => Object::Reference(text_form_id),
+                },
+            )
+        } else {
+            (
+                text_form_id,
+                b"q /Outer Do Q".to_vec(),
+                dictionary! { "Outer" => Object::Reference(text_form_id) },
+            )
+        };
+        let content_id = doc.add_object(Object::Stream(Stream::new(dictionary! {}, page_content)));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Contents" => Object::Reference(content_id),
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+                "XObject" => xobjects,
+            },
+            "MediaBox" => vec![0.into(), 0.into(), 200.into(), 200.into()],
+        });
+        let pages_id = doc.add_object(dictionary! {
+            "Type" => "Pages",
+            "Count" => 1,
+            "Kids" => vec![Object::Reference(page_id)],
+        });
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        (doc, page_id, entry_form_id)
+    }
+
+    fn upstream_style_form_extraction(
+        doc: &Document,
+        form_id: ObjectId,
+        cmaps: &FontCMaps,
+    ) -> Vec<TextItem> {
+        extract_form_xobject_text(
+            doc,
+            form_id,
+            1,
+            cmaps,
+            &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            &BTreeMap::new(),
+            &HashMap::new(),
+            &mut CMapDecisionCache::new(),
+            &mut FontStyleCache::new(),
+        )
+    }
+
+    fn current_page_extraction(
+        doc: &Document,
+        page_id: ObjectId,
+        cmaps: &FontCMaps,
+    ) -> Vec<TextItem> {
+        let ((items, _, _), _, _) =
+            extract_page_text_items(doc, page_id, 1, cmaps, false, &mut FontStyleCache::new())
+                .unwrap();
+        items
+    }
+
+    #[test]
+    fn inherited_page_font_in_form_is_recovered() {
+        let (doc, page_id, form_id) = inherited_resource_fixture(false);
+        let cmaps = FontCMaps::from_doc(&doc);
+
+        assert!(upstream_style_form_extraction(&doc, form_id, &cmaps).is_empty());
+        let items = current_page_extraction(&doc, page_id, &cmaps);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            ["X"]
+        );
+    }
+
+    #[test]
+    fn inherited_page_resources_reach_nested_form() {
+        let (doc, page_id, form_id) = inherited_resource_fixture(true);
+        let cmaps = FontCMaps::from_doc(&doc);
+
+        assert!(upstream_style_form_extraction(&doc, form_id, &cmaps).is_empty());
+        let items = current_page_extraction(&doc, page_id, &cmaps);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            ["X"]
+        );
+    }
+}
