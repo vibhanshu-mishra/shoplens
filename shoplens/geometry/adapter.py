@@ -3,6 +3,11 @@
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple, Union
 
+from shoplens.extraction.page_numbers import (
+    to_pdf_inspector_page_indexes,
+    to_shoplens_page_number,
+)
+
 from .models import Box, LineSegment, PageGeometry, ShapeGeometry
 from .transforms import IDENTITY, Matrix, bounds, multiply, to_positioned_coordinates, transform_box, transform_point
 
@@ -19,7 +24,9 @@ def extract_page_geometry(
     if pdf_inspector is not None and hasattr(pdf_inspector, "extract_page_geometry"):
         native = [
             _from_native(value)
-            for value in pdf_inspector.extract_page_geometry(str(path), pages=list(pages))
+            for value in pdf_inspector.extract_page_geometry(
+                str(path), pages=to_pdf_inspector_page_indexes(pages)
+            )
         ]
         if not any("CURVE_GEOMETRY_NOT_EXPOSED" in item.warnings for item in native):
             return native
@@ -28,12 +35,15 @@ def extract_page_geometry(
 
 def _from_native(value: Any) -> PageGeometry:
     lines = [
-        LineSegment(item.page, item.x1, item.y1, item.x2, item.y2, source="pdf_inspector")
+        LineSegment(
+            to_shoplens_page_number(item.page), item.x1, item.y1, item.x2, item.y2,
+            source="pdf_inspector",
+        )
         for item in value.lines
     ]
     shapes = [
         ShapeGeometry(
-            item.page,
+            to_shoplens_page_number(item.page),
             "RECTANGLE",
             _normalized_rectangle(item.x, item.y, item.width, item.height),
             "pdf_inspector_re",
@@ -41,7 +51,7 @@ def _from_native(value: Any) -> PageGeometry:
         for item in value.rectangles
     ]
     return PageGeometry(
-        pdf_page=value.page,
+        pdf_page=to_shoplens_page_number(value.page),
         width=value.width,
         height=value.height,
         rotation=value.rotation,

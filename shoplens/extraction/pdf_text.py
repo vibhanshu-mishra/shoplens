@@ -1,11 +1,25 @@
 """Thin adapter around pdf-inspector's positioned-text Python API."""
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Union
+
+from .page_numbers import to_pdf_inspector_page_indexes, to_shoplens_page_number
 
 
 class PdfInspectorUnavailableError(RuntimeError):
     """Raised when the native pdf-inspector Python extension cannot be loaded."""
+
+
+@dataclass(frozen=True)
+class PositionedTextItem:
+    """Native positioned text with ShopLens's one-based public page value."""
+
+    native_item: Any
+    page: int
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.native_item, name)
 
 
 def get_pdf_page_count(path: Union[str, Path]) -> int:
@@ -24,7 +38,7 @@ def get_pdf_page_count(path: Union[str, Path]) -> int:
 def extract_positioned_text(
     path: Union[str, Path], pages: Optional[Sequence[int]] = None
 ) -> List[Any]:
-    """Extract 1-based page numbers and PDF-point bounding boxes from a PDF."""
+    """Extract one-based ShopLens pages and PDF-point bounding boxes from a PDF."""
 
     try:
         import pdf_inspector
@@ -36,8 +50,12 @@ def extract_positioned_text(
         ) from exc
 
     try:
-        page_filter = list(pages) if pages is not None else None
-        return list(pdf_inspector.extract_text_with_positions(str(path), pages=page_filter))
+        page_filter = to_pdf_inspector_page_indexes(pages) if pages is not None else None
+        native_items = pdf_inspector.extract_text_with_positions(str(path), pages=page_filter)
+        return [
+            PositionedTextItem(item, to_shoplens_page_number(int(item.page)))
+            for item in native_items
+        ]
     except (AttributeError, ImportError) as exc:
         raise PdfInspectorUnavailableError(
             "The installed pdf-inspector extension does not provide positioned text. "
