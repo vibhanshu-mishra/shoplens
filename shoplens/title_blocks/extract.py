@@ -3,7 +3,7 @@
 import math
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
@@ -81,6 +81,9 @@ def extract_title_blocks(
     source_file: str,
     pages: Sequence[int],
     declared_entries: Sequence[SheetEntry] = (),
+    *,
+    declared_total: Optional[int] = None,
+    sheet_list_pages: Sequence[int] = (),
 ) -> TitleBlockResult:
     """Extract one actual title-block identity per requested PDF page."""
 
@@ -136,7 +139,21 @@ def extract_title_blocks(
         results.append(page_result)
         debug.append(page_debug)
 
-    identified = [page for page in results if page.sheet_number is not None]
+    results = _reconstruct_residual_declared_identity(
+        results,
+        by_page,
+        declared_entries,
+        declared_total,
+    )
+    results = _mark_declared_sheet_index_pages(results, declared_entries, sheet_list_pages)
+
+    intentional_non_title_block_pages = [
+        page.pdf_page for page in results if page.title_block_status == "NOT_PRESENT"
+    ]
+    identified = [
+        page for page in results
+        if page.sheet_number is not None and page.title_block_status != "NOT_PRESENT"
+    ]
     grouped: Dict[str, List[int]] = defaultdict(list)
     for page in identified:
         grouped[page.sheet_number or ""].append(page.pdf_page)
@@ -165,11 +182,112 @@ def extract_title_blocks(
         pages=results,
         warnings=warnings,
         debug=debug,
+        intentional_non_title_block_pages=intentional_non_title_block_pages,
     )
 
 
 def normalize_number(value: str) -> str:
     return re.sub(r"\s+", "", value).upper()
+
+
+def _reconstruct_residual_declared_identity(
+    results: Sequence[TitleBlockPage],
+    by_page: Dict[int, List[PositionedText]],
+    declared_entries: Sequence[SheetEntry],
+    declared_total: Optional[int],
+) -> List[TitleBlockPage]:
+    """Resolve one textless residual page only from an exhaustive Sheet List.
+
+    This deliberately requires a closed declared set and exactly one remaining
+    identity.  It cannot turn an ambiguous page or an incomplete Sheet List
+    into a guessed drawing record.
+    """
+
+    declared = {entry.sheet_number: entry for entry in declared_entries}
+    identified = {page.sheet_number for page in results if page.sheet_number is not None}
+    missing_numbers = sorted(set(declared) - identified)
+    textless_pages = [
+        page for page in results
+        if page.sheet_number is None and not by_page.get(page.pdf_page)
+    ]
+    if (
+        declared_total is None
+        or declared_total != len(declared)
+        or len(missing_numbers) != 1
+        or len(textless_pages) != 1
+        or len(identified) != len(declared) - 1
+    ):
+        return list(results)
+
+    source = declared[missing_numbers[0]]
+    replacement = replace(
+        textless_pages[0],
+        sheet_number=source.sheet_number,
+        sheet_title=source.sheet_name,
+        confidence=0.90,
+        evidence=[
+            "DECLARED_SHEET_LIST_EXHAUSTIVE",
+            "SINGLE_RESIDUAL_DECLARED_IDENTITY",
+            "NO_POSITIONED_TEXT_ON_PAGE",
+        ],
+        warnings=["RECONSTRUCTED_FROM_DECLARED_SHEET_LIST"],
+        identity_source="DECLARED_SHEET_LIST",
+        title_block_status="RECONSTRUCTED",
+    )
+    return [replacement if page.pdf_page == replacement.pdf_page else page for page in results]
+
+
+def _mark_declared_sheet_index_pages(
+    results: Sequence[TitleBlockPage],
+    declared_entries: Sequence[SheetEntry],
+    sheet_list_pages: Sequence[int],
+) -> List[TitleBlockPage]:
+    """Mark a self-referential Sheet Index row as known non-title-block identity."""
+
+    index_pages = {int(page) for page in sheet_list_pages}
+    replacements: Dict[int, TitleBlockPage] = {}
+    for page_number in index_pages:
+        matches = [
+            entry for entry in declared_entries
+            if entry.source_page == page_number and _sheet_index_title(entry.sheet_name) is not None
+        ]
+        if len(matches) != 1:
+            continue
+        entry = matches[0]
+        # The identity comes from the declared row, rather than from any
+        # title-block-like text elsewhere on the sheet.
+        replacements[page_number] = TitleBlockPage(
+            pdf_page=page_number,
+            sheet_number=entry.sheet_number,
+            sheet_title=_sheet_index_title(entry.sheet_name),
+            revision=None,
+            confidence=entry.confidence,
+            layout_id=None,
+            number_original_text=None,
+            title_original_text=None,
+            number_x=None,
+            number_y=None,
+            number_width=None,
+            number_height=None,
+            title_x=None,
+            title_y=None,
+            title_width=None,
+            title_height=None,
+            evidence=["DECLARED_SHEET_LIST", "SHEET_INDEX_PAGE"],
+            candidate_count=0,
+            warnings=["NO_CONVENTIONAL_TITLE_BLOCK"],
+            identity_source="DECLARED_SHEET_LIST",
+            title_block_status="NOT_PRESENT",
+            page_role="SHEET_INDEX",
+        )
+    return [replacements.get(page.pdf_page, page) for page in results]
+
+
+def _sheet_index_title(value: str) -> Optional[str]:
+    """Return a canonical declared Sheet Index title, ignoring table markers."""
+
+    compact = re.sub(r"[^A-Z0-9]+", " ", value.upper()).strip()
+    return compact if compact in {"SHEET INDEX", "SHEET LIST", "DRAWING LIST", "INDEX OF DRAWINGS"} else None
 
 
 def _number_profile(value: str) -> Optional[str]:
@@ -217,6 +335,9 @@ def _generate_candidates(
         if number in declared:
             score += 0.15
             reasons.append("DECLARED_LIST_MATCH")
+        if len(getattr(item, "source_fragments", [item.text])) > 1:
+            score += 0.16
+            reasons.append("COMPLETE_SHEET_NUMBER_OVER_PREFIX")
         font_size = float(getattr(item, "font_size", item.height))
         if font_size >= typical_font * 1.2:
             score += 0.1
@@ -421,7 +542,7 @@ def _title_fragments(items: Sequence[PositionedText], candidate: _Candidate) -> 
         font_size = float(getattr(item, "font_size", item.height))
         if not (height * 0.5 <= font_size <= height * 0.85):
             continue
-        if _excluded_title_text(item.text):
+        if _excluded_title_text(item.text) or _number_profile(item.text) is not None:
             continue
         if rotated:
             in_region = (
@@ -465,6 +586,7 @@ def _labeled_title_fragments(
         if item is not label
         and item is not candidate.item
         and not _excluded_title_text(item.text)
+        and _number_profile(item.text) is None
         and float(getattr(item, "font_size", item.height)) >= label_size * 1.1
         and _distance(item, label) <= max(450.0, number_height * 14.0)
     ]
@@ -481,6 +603,7 @@ def _excluded_title_text(value: str) -> bool:
     compact = re.sub(r"\s+", " ", value).strip().upper()
     return bool(
         not compact
+        or re.fullmatch(r"[-–—_]+", compact) is not None
         or compact in {"SHEET", "TITLE", "JOB", "DATE", "REV", "REVISION", "ISSUES", "REVISIONS"}
         or re.fullmatch(
             r"(?:SHEET|DRAWING|DWG|DOCUMENT)\s+(?:NUMBER|NO\.?|TITLE)\s*:?",
@@ -626,6 +749,42 @@ def _join_number_fragments(items: Sequence[PositionedText]) -> List[_JoinedText]
                             source_fragments=[item.text for item in fragments],
                         )
                     )
+
+    # Some title strips are represented as upright glyph runs stacked along a
+    # common x-axis rather than as zero-width rotated text.  Treat that as a
+    # separate orientation only when the fragments share a baseline column,
+    # font, and compact reading order; this avoids joining ordinary vertical
+    # lists elsewhere on the page.
+    ordered = sorted(items, key=lambda item: (-float(item.y), float(item.x)))
+    for start in range(len(ordered)):
+        fragments = [ordered[start]]
+        for candidate in ordered[start + 1 : start + 12]:
+            previous = fragments[-1]
+            typical = max(float(previous.height), float(candidate.height), 1.0)
+            same_font = getattr(previous, "font", None) == getattr(candidate, "font", None)
+            same_column = abs(float(previous.x) - float(candidate.x)) <= typical * 0.6
+            vertical_gap = float(previous.y) - (float(candidate.y) + float(candidate.height))
+            if not same_font or not same_column:
+                continue
+            if not (-typical * 0.8 <= vertical_gap <= typical * 1.75):
+                break
+            fragments.append(candidate)
+            combined = "".join(item.text.strip() for item in fragments)
+            if _number_profile(combined) and not all(_number_profile(item.text) for item in fragments):
+                left, bottom, width, height = _box(fragments)
+                joined.append(
+                    _JoinedText(
+                        text=combined,
+                        page=int(fragments[0].page),
+                        x=float(left or 0.0),
+                        y=float(bottom or 0.0),
+                        width=float(width or 0.0),
+                        height=float(height or 0.0),
+                        font=getattr(fragments[0], "font", None),
+                        font_size=float(getattr(fragments[0], "font_size", fragments[0].height)),
+                        source_fragments=[item.text for item in fragments],
+                    )
+                )
     return joined
 
 

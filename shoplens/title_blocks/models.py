@@ -53,6 +53,11 @@ class TitleBlockPage:
     warnings: List[str]
     number_source_fragments: List[str] = field(default_factory=list)
     title_source_fragments: List[str] = field(default_factory=list)
+    # A page can have a known drawing identity without a conventional title
+    # block, or be reconstructed from an exhaustive declared Sheet List.
+    identity_source: str = "TITLE_BLOCK"
+    title_block_status: str = "PRESENT"
+    page_role: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -70,6 +75,7 @@ class TitleBlockResult:
     pages: List[TitleBlockPage]
     warnings: List[str]
     debug: List[Dict[str, Any]] = field(default_factory=list)
+    intentional_non_title_block_pages: List[int] = field(default_factory=list)
 
     def to_dict(self, include_debug: bool = False) -> Dict[str, Any]:
         result = asdict(self)

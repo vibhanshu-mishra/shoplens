@@ -267,7 +267,15 @@ def _sheet_list(path: Path, context: Dict[str, Any]):
 def _title_blocks(path: Path, context: Dict[str, Any]):
     pages = list(range(1, context["page_count"] + 1))
     declared_entries = context.get("declared").entries if context.get("declared") else []
-    result = extract_title_blocks(context["items"], str(path), pages, declared_entries)
+    declared = context.get("declared")
+    result = extract_title_blocks(
+        context["items"],
+        str(path),
+        pages,
+        declared_entries,
+        declared_total=declared.declared_total if declared else None,
+        sheet_list_pages=declared.sheet_list_pages if declared else (),
+    )
     warnings = list(result.warnings)
     if result.identified_page_count == 0:
         warnings.append("NO_TITLE_BLOCKS_IDENTIFIED")
@@ -280,6 +288,9 @@ def _title_blocks(path: Path, context: Dict[str, Any]):
     return {
         "page_count": result.total_pdf_pages_processed,
         "identified_page_count": result.identified_page_count,
+        "intentional_non_title_block_page_count": len(
+            getattr(result, "intentional_non_title_block_pages", [])
+        ),
         "unidentified_page_count": len(result.unidentified_pages),
         "low_confidence_page_count": len(result.low_confidence_pages),
         "layout_count": len(result.layouts_discovered),
