@@ -514,6 +514,8 @@ def _extract_package_title_blocks_with_items(path: Path):
         str(path),
         list(range(1, page_count + 1)),
         declared.entries,
+        declared_total=declared.declared_total,
+        sheet_list_pages=declared.sheet_list_pages,
     )
     return declared, actual, items, 0
 
@@ -531,6 +533,10 @@ def _run_title_blocks(args: argparse.Namespace) -> int:
         return 0
     print(f"Total PDF pages processed: {result.total_pdf_pages_processed}")
     print(f"Pages identified: {result.identified_page_count}")
+    print(
+        "Pages intentionally without conventional title blocks: "
+        f"{len(result.intentional_non_title_block_pages)}"
+    )
     print(f"Pages unidentified: {len(result.unidentified_pages)}")
     print(f"Layouts discovered: {len(result.layouts_discovered)}")
     print(f"Low-confidence pages: {len(result.low_confidence_pages)}")

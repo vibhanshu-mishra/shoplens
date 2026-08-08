@@ -123,6 +123,15 @@ class SheetListExtractionTests(unittest.TestCase):
         result = extract_sheet_list(items, "drawing.pdf", [1])
         self.assertEqual([entry.sheet_number for entry in result.entries], ["SK-01"])
 
+    def test_sheet_index_named_declared_row_is_not_dropped_as_a_heading(self):
+        items = headers(heading="SHEET INDEX")
+        items += row("S005", "SHEET INDEX", 800)
+        result = extract_sheet_list(items, "drawing.pdf", [1])
+        self.assertEqual(
+            [(entry.sheet_number, entry.sheet_name) for entry in result.entries],
+            [("S005", "SHEET INDEX")],
+        )
+
     def test_normal_shifted_table_headers_rows_and_y_tolerance(self):
         items = headers(shift=275) + row(
             "S1-20A", "SECOND FLOOR", 800, shift=275, name_y=798.5

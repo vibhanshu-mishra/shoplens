@@ -14,8 +14,12 @@ NUMBER_HEADER_RE = re.compile(r"^(?:SHEET\s*)?(?:NUMBER|NO\.?|#)$", re.IGNORECAS
 NAME_HEADER_RE = re.compile(
     r"^(?:SHEET\s*)?(?:NAME|TITLE)|^(?:DRAWING\s+TITLE|DESCRIPTION)$", re.IGNORECASE
 )
+# Structural sheet identifiers commonly carry compact letter/digit suffixes
+# (S11-OPL1), multiple hyphen fields (S01-10-P1), or an underscore revision
+# family (BS11-00_FR). Contextual title-block evidence still decides whether a
+# syntactically valid value is an actual sheet number.
 SHEET_NUMBER_RE = re.compile(
-    r"^[A-Z]{1,3}-?\d{1,4}(?:-\d{1,3})?[A-Z]?$", re.IGNORECASE
+    r"^[A-Z]{1,4}-?\d{1,4}[A-Z]?(?:-[A-Z0-9]{1,4})*(?:_[A-Z]{1,4})?$", re.IGNORECASE
 )
 FOOTER_RE = re.compile(r"\b(?:GRAND\s+TOTAL|TOTAL\s+SHEETS?|SHEET\s+COUNT)\b", re.IGNORECASE)
 DECLARED_TOTAL_RE = re.compile(r"\bGRAND\s+TOTAL\s*:\s*(\d+)\b", re.IGNORECASE)
@@ -334,7 +338,13 @@ def _extract_page_rows(
     rejected: List[Dict[str, Any]] = []
     invalid_row_count = 0
     for row in rows:
-        if _heading_name(row.text) or _is_header_row(row) or _row_has_footer(row):
+        # A declared row such as ``S005 | SHEET INDEX`` contains a heading
+        # phrase, but remains a real Sheet List entry.  Only a heading-only
+        # row is structural table chrome.
+        heading_only = _heading_name(row.text) is not None and not any(
+            is_sheet_number(item.text) for item in row.items
+        )
+        if heading_only or _is_header_row(row) or _row_has_footer(row):
             reason = "HEADING_OR_HEADER" if not _row_has_footer(row) else "FOOTER_ROW"
             rejected.append({"y": row.y, "text": row.text, "reason": reason})
             continue

@@ -1,7 +1,7 @@
 """Synthetic title-block extraction and reconciliation tests."""
 
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from shoplens.sheets.models import SheetEntry, SheetListResult
 from shoplens.title_blocks import extract_title_blocks, reconcile_sheets
@@ -119,6 +119,109 @@ class TitleBlockExtractionTests(unittest.TestCase):
         self.assertEqual(result.pages[0].sheet_title, "MOMENT FRAME")
         self.assertEqual(result.pages[1].sheet_number, "S01-30F-P1")
         self.assertEqual(result.pages[1].sheet_title, "ROOF FRAMING PLAN")
+
+    def test_compact_suffixes_underscores_and_complete_fragment_preference(self):
+        cases = (
+            "S11-F1",
+            "S11-OPL1",
+            "S11-T1",
+            "BS11-00_FR",
+            "BS11-01_RA",
+            "S01-10-P1",
+        )
+        items = []
+        for page, number in enumerate(cases, start=1):
+            items += standard_block(page, number, ["FOUNDATION PLAN"])
+        result = extract_title_blocks(items, "drawing.pdf", range(1, len(cases) + 1))
+        self.assertEqual([page.sheet_number for page in result.pages], list(cases))
+
+        fragments = [
+            Item("Sheet", 7, 960, 100, 40, 12, font_size=12),
+            Item("BS42", 7, 900, 120, 92, 37, font_size=37),
+            Item("-", 7, 900, 50, 12, 37, font_size=37),
+            Item("01", 7, 900, 10, 41, 37, font_size=37),
+            Item("ELEVATOR PLANS AND SECTIONS", 7, 900, 220, 220, 20, font_size=20),
+        ]
+        fragment_result = extract_title_blocks(fragments, "drawing.pdf", [7])
+        page = fragment_result.pages[0]
+        self.assertEqual(page.sheet_number, "BS42-01")
+        self.assertEqual(page.number_source_fragments, ["BS42", "-", "01"])
+        self.assertIn("COMPLETE_SHEET_NUMBER_OVER_PREFIX", page.evidence)
+
+    def test_complete_coded_number_and_multiline_title_outrank_placeholders(self):
+        items = [
+            Item("Sheet", 1, 900, 80, 50, 19, font_size=19),
+            Item("S01-10-P1", 1, 960, 20, 120, 30, font_size=30),
+            Item("Title", 1, 900, 220, 30, 12, font_size=12),
+            Item("-", 1, 900, 195, 12, 20, font_size=20),
+            Item("OVERALL FOUNDATION", 1, 820, 190, 180, 20, font_size=20),
+            Item("PLAN", 1, 820, 160, 60, 20, font_size=20),
+        ]
+        result = extract_title_blocks(items, "drawing.pdf", [1])
+        page = result.pages[0]
+        self.assertEqual(page.sheet_number, "S01-10-P1")
+        self.assertEqual(page.sheet_title, "OVERALL FOUNDATION PLAN")
+        self.assertNotIn("-", page.title_source_fragments)
+
+    def test_declared_residual_reconstruction_requires_one_textless_page(self):
+        declarations = [
+            declared("S01-10-P1", "OVERALL FOUNDATION PLAN"),
+            declared("S01-10A-P1", "FOUNDATION PLAN - SEGMENT A"),
+            declared("S01-10B-P1", "FOUNDATION PLAN - SEGMENT B"),
+        ]
+        items = standard_block(1, "S01-10A-P1", ["FOUNDATION PLAN - SEGMENT A"])
+        items += standard_block(3, "S01-10B-P1", ["FOUNDATION PLAN - SEGMENT B"])
+        result = extract_title_blocks(
+            items,
+            "drawing.pdf",
+            [1, 2, 3],
+            declarations,
+            declared_total=3,
+        )
+        page = result.pages[1]
+        self.assertEqual(page.sheet_number, "S01-10-P1")
+        self.assertEqual(page.sheet_title, "OVERALL FOUNDATION PLAN")
+        self.assertEqual(page.identity_source, "DECLARED_SHEET_LIST")
+        self.assertEqual(page.title_block_status, "RECONSTRUCTED")
+        self.assertIsNone(page.number_x)
+        self.assertIn("SINGLE_RESIDUAL_DECLARED_IDENTITY", page.evidence)
+
+    def test_declared_sheet_index_is_known_without_a_title_block(self):
+        index = replace(declared("S005", "SHEET INDEX"), source_page=2)
+        result = extract_title_blocks(
+            standard_block(1, "S001", ["GENERAL NOTES"]),
+            "drawing.pdf",
+            [1, 2, 3],
+            [index],
+            declared_total=1,
+            sheet_list_pages=[2],
+        )
+        page = result.pages[1]
+        self.assertEqual(page.sheet_number, "S005")
+        self.assertEqual(page.sheet_title, "SHEET INDEX")
+        self.assertEqual(page.identity_source, "DECLARED_SHEET_LIST")
+        self.assertEqual(page.title_block_status, "NOT_PRESENT")
+        self.assertEqual(page.page_role, "SHEET_INDEX")
+        self.assertIsNone(page.number_x)
+        self.assertEqual(result.identified_page_count, 1)
+        self.assertEqual(result.intentional_non_title_block_pages, [2])
+        self.assertEqual(result.unidentified_pages, [3])
+        self.assertEqual(
+            result.total_pdf_pages_processed,
+            result.identified_page_count
+            + len(result.intentional_non_title_block_pages)
+            + len(result.unidentified_pages),
+        )
+
+    def test_non_textless_or_non_exhaustive_residual_stays_unidentified(self):
+        result = extract_title_blocks(
+            [Item("unrelated", 2, 100, 100)],
+            "drawing.pdf",
+            [1, 2],
+            [declared("S01-10-P1", "OVERALL FOUNDATION PLAN")],
+            declared_total=2,
+        )
+        self.assertEqual(result.unidentified_pages, [1, 2])
 
     def test_repeated_layout_fragmented_titles_and_declared_matches(self):
         declarations = [declared("S0-00", "GENERAL NOTES"), declared("S1-20A", "FRAMING PLAN-A"), declared("S5-00", "STEEL DETAILS")]

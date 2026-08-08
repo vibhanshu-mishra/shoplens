@@ -160,6 +160,7 @@ class DiscoveryAndRunnerTests(unittest.TestCase):
         self.assertIn("NO_TITLE_BLOCKS_IDENTIFIED", metrics["_warnings"])
         self.assertIn("UNIDENTIFIED_TITLE_BLOCK_PAGES: 2", metrics["_warnings"])
         self.assertIn("LOW_CONFIDENCE_TITLE_BLOCK_PAGES: 1", metrics["_warnings"])
+        self.assertEqual(metrics["intentional_non_title_block_page_count"], 0)
 
         reconciliation = SimpleNamespace(
             entries=[SimpleNamespace(

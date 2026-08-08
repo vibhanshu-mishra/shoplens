@@ -256,6 +256,15 @@ evidence establishes the context. Ambiguous candidates remain unidentified and
 receive a low-confidence warning. Revision is blank unless an explicit nearby
 `REV` or `REVISION` field supplies a clear value.
 
+When a page is itself a declared `SHEET INDEX`/`SHEET LIST`, ShopLens can report
+its identity without pretending that the table is a conventional title block.
+Such a record uses `identity_source=DECLARED_SHEET_LIST`,
+`title_block_status=NOT_PRESENT`, and `page_role=SHEET_INDEX`; its title-block
+coordinates remain blank. Validation reports these intentional non-title-block
+pages separately from genuinely unidentified pages. A textless residual page is
+reconstructed from the declared list only when that list is complete and it
+leaves exactly one declared identity and one textless PDF page.
+
 On macOS, run these commands from the repository directory:
 
 ```bash
