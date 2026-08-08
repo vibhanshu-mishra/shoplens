@@ -420,7 +420,7 @@ def _print_diagnostic(item: TextDiagnostic) -> None:
 
 
 def _run_debug_text(args: argparse.Namespace) -> int:
-    items, status = _load_items(args.pdf)
+    items, status = _load_items(args.pdf, pages=[args.page] if args.page is not None else None)
     if items is None:
         return status
     _, _, diagnostics = analyze_positioned_text(items)
