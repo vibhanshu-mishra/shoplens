@@ -5,7 +5,7 @@ use crate::text_utils::{effective_font_size, expand_ligatures, is_bold_font, is_
 use crate::tounicode::FontCMaps;
 use crate::types::{ItemType, TextItem};
 use lopdf::{Document, Encoding, Object, ObjectId};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::fonts::{
     build_font_encodings, build_font_widths, compute_string_width_ts, extract_text_from_operand,
@@ -15,6 +15,7 @@ use super::{get_number, image_bbox_from_ctm, multiply_matrices};
 
 const MAX_FORM_XOBJECT_DEPTH: u8 = 5;
 
+#[derive(Clone, Copy)]
 pub(crate) enum XObjectType {
     Image,
     Form(ObjectId),
@@ -52,8 +53,9 @@ pub(crate) fn get_page_xobjects(
 fn get_form_xobjects(
     doc: &Document,
     form_dict: &lopdf::Dictionary,
+    parent_xobjects: &HashMap<String, XObjectType>,
 ) -> HashMap<String, XObjectType> {
-    let mut xobject_types = HashMap::new();
+    let mut xobject_types = parent_xobjects.clone();
 
     let resources = if let Ok(res_ref) = form_dict.get(b"Resources") {
         if let Ok(obj_ref) = res_ref.as_reference() {
@@ -108,24 +110,31 @@ fn collect_xobjects_from_dict(
 }
 
 /// Extract text items from a Form XObject
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_form_xobject_text(
     doc: &Document,
     form_id: ObjectId,
     page_num: u32,
     font_cmaps: &FontCMaps,
     parent_ctm: &[f32; 6],
+    parent_fonts: &BTreeMap<Vec<u8>, &lopdf::Dictionary>,
+    parent_xobjects: &HashMap<String, XObjectType>,
     cmap_decisions: &mut CMapDecisionCache,
     style_cache: &mut FontStyleCache,
 ) -> Vec<TextItem> {
+    let mut active_forms = HashSet::new();
     extract_form_xobject_text_inner(
         doc,
         form_id,
         page_num,
         font_cmaps,
         parent_ctm,
+        parent_fonts,
+        parent_xobjects,
         cmap_decisions,
         style_cache,
         0,
+        &mut active_forms,
     )
 }
 
@@ -136,16 +145,23 @@ fn extract_form_xobject_text_inner(
     page_num: u32,
     font_cmaps: &FontCMaps,
     parent_ctm: &[f32; 6],
+    parent_fonts: &BTreeMap<Vec<u8>, &lopdf::Dictionary>,
+    parent_xobjects: &HashMap<String, XObjectType>,
     cmap_decisions: &mut CMapDecisionCache,
     style_cache: &mut FontStyleCache,
     depth: u8,
+    active_forms: &mut HashSet<ObjectId>,
 ) -> Vec<TextItem> {
     use lopdf::content::Content;
 
     let mut items = Vec::new();
+    if depth > MAX_FORM_XOBJECT_DEPTH || !active_forms.insert(form_id) {
+        return items;
+    }
 
     // Get the Form XObject stream
     let Ok(Object::Stream(stream)) = doc.get_object(form_id) else {
+        active_forms.remove(&form_id);
         return items;
     };
 
@@ -157,11 +173,12 @@ fn extract_form_xobject_text_inner(
 
     // Decode the content stream
     let Ok(content) = Content::decode(&content_data) else {
+        active_forms.remove(&form_id);
         return items;
     };
 
     // Get fonts from the Form's Resources
-    let form_fonts = get_form_fonts(doc, &stream.dict);
+    let form_fonts = get_form_fonts(doc, &stream.dict, parent_fonts);
     let (font_encodings, _has_gid_fonts) = build_font_encodings(doc, &form_fonts, font_cmaps);
 
     // Build font width info for the form
@@ -218,7 +235,7 @@ fn extract_form_xobject_text_inner(
     }
 
     // Build XObject map from the Form's own Resources for nested Do
-    let form_xobjects = get_form_xobjects(doc, &stream.dict);
+    let form_xobjects = get_form_xobjects(doc, &stream.dict, parent_xobjects);
 
     // Apply the Form XObject's own Matrix (if any) to the parent CTM
     let form_matrix = if let Ok(matrix_obj) = stream.dict.get(b"Matrix") {
@@ -274,19 +291,20 @@ fn extract_form_xobject_text_inner(
                         let xobj_name = String::from_utf8_lossy(name).to_string();
                         match form_xobjects.get(&xobj_name) {
                             Some(XObjectType::Form(nested_id)) => {
-                                if depth < MAX_FORM_XOBJECT_DEPTH {
-                                    let nested_items = extract_form_xobject_text_inner(
-                                        doc,
-                                        *nested_id,
-                                        page_num,
-                                        font_cmaps,
-                                        &ctm,
-                                        cmap_decisions,
-                                        style_cache,
-                                        depth + 1,
-                                    );
-                                    items.extend(nested_items);
-                                }
+                                let nested_items = extract_form_xobject_text_inner(
+                                    doc,
+                                    *nested_id,
+                                    page_num,
+                                    font_cmaps,
+                                    &ctm,
+                                    &form_fonts,
+                                    &form_xobjects,
+                                    cmap_decisions,
+                                    style_cache,
+                                    depth + 1,
+                                    active_forms,
+                                );
+                                items.extend(nested_items);
                             }
                             Some(XObjectType::Image) => {
                                 // Mirror the top-level Image-XObject emission
@@ -628,6 +646,7 @@ fn extract_form_xobject_text_inner(
         }
     }
 
+    active_forms.remove(&form_id);
     items
 }
 
@@ -635,8 +654,9 @@ fn extract_form_xobject_text_inner(
 pub(crate) fn get_form_fonts<'a>(
     doc: &'a Document,
     form_dict: &lopdf::Dictionary,
-) -> std::collections::BTreeMap<Vec<u8>, &'a lopdf::Dictionary> {
-    let mut fonts = std::collections::BTreeMap::new();
+    parent_fonts: &BTreeMap<Vec<u8>, &'a lopdf::Dictionary>,
+) -> BTreeMap<Vec<u8>, &'a lopdf::Dictionary> {
+    let mut fonts = parent_fonts.clone();
 
     // Get Resources from Form dictionary
     let resources = if let Ok(res_ref) = form_dict.get(b"Resources") {
