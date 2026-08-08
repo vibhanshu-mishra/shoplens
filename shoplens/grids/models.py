@@ -26,6 +26,8 @@ class GridLabel:
     confidence: float
     evidence: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    observation_id: Optional[str] = None
+    bubble_alternative_count: int = 0
 
     @property
     def center_x(self) -> float:
@@ -81,6 +83,7 @@ class GridSystem:
     rejected_candidates: List[RejectedGridCandidate]
     confidence: float
     warnings: List[str]
+    bubble_diagnostics: Dict[str, int] = field(default_factory=dict)
     grid_version: str = "1.0"
 
     def to_dict(self) -> Dict[str, Any]:

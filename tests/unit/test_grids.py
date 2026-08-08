@@ -139,8 +139,100 @@ class GridDetectionTests(unittest.TestCase):
         by_label = {axis.normalized_label: axis for axis in self.grid.vertical_axes}
         self.assertEqual(len(by_label["A"].label_candidates), 2)
         self.assertEqual(len(by_label["AA"].label_candidates), 1)
+        self.assertIn("LABEL_REPEATED_AT_OPPOSITE_ENDS", by_label["A"].evidence)
         self.assertTrue(all(axis.intersection_count == 3 for axis in self.grid.vertical_axes))
         self.assertIsNotNone(GRID_LABEL_RE.fullmatch("A.1"))
+
+    def test_one_text_item_surrounded_by_overlapping_bubbles_is_one_observation(self):
+        shapes = [ellipse(100, 100, 20.0) for _ in range(100)]
+        geometry = PageGeometry(
+            1, 200, 200, 0, (0, 0, 200, 200), (0, 0, 200, 200),
+            "raw", "synthetic", shapes=shapes,
+        )
+        result = detect_grid_system("drawing.pdf", geometry, [text("A", 95, 95)])
+        self.assertEqual(len(result.unassigned_labels), 1)
+        self.assertEqual(result.unassigned_labels[0].bubble_alternative_count, 0)
+        self.assertEqual(result.bubble_diagnostics["raw_bubble_candidate_count"], 100)
+        self.assertEqual(result.bubble_diagnostics["deduplicated_bubble_candidate_count"], 1)
+        self.assertEqual(result.bubble_diagnostics["physical_label_observation_count"], 1)
+
+    def test_unrelated_dominant_bubble_size_does_not_reject_real_grid_family(self):
+        geometry, items = regular_geometry_and_text()
+        geometry.shapes.extend(
+            ellipse(40 + index * 9, 730, 8.0) for index in range(100)
+        )
+        result = detect_grid_system("drawing.pdf", geometry, items)
+        self.assertEqual(
+            [axis.normalized_label for axis in result.vertical_axes], ["A", "B", "AA"]
+        )
+        self.assertEqual(
+            [axis.normalized_label for axis in result.horizontal_axes], ["1", "2", "2.5"]
+        )
+        self.assertFalse(any(
+            candidate.reason == "INCONSISTENT_BUBBLE_SIZE"
+            for candidate in result.rejected_candidates
+        ))
+
+    def test_two_legitimate_bubble_size_families_survive(self):
+        lines, shapes, items = [], [], []
+        for label, x in (("A.1", 100.0), ("B.5", 200.0), ("C", 300.0)):
+            shapes.extend([ellipse(x, 380, 20), ellipse(x, 20, 32)])
+            items.extend([text(label, x - 5, 375), text(label, x - 5, 15)])
+            lines.append(LineSegment(1, x, 40, x, 360))
+        for label, y in (("1", 100.0), ("2", 200.0), ("3.5", 300.0)):
+            shapes.extend([ellipse(20, y, 20), ellipse(380, y, 32)])
+            items.extend([text(label, 15, y - 5), text(label, 375, y - 5)])
+            lines.append(LineSegment(1, 40, y, 360, y))
+        geometry = PageGeometry(
+            1, 400, 400, 0, (0, 0, 400, 400), (0, 0, 400, 400),
+            "raw", "synthetic", lines=lines, shapes=shapes,
+        )
+        result = detect_grid_system("drawing.pdf", geometry, items)
+        self.assertEqual([axis.normalized_label for axis in result.vertical_axes], ["A.1", "B.5", "C"])
+        self.assertEqual([axis.normalized_label for axis in result.horizontal_axes], ["1", "2", "3.5"])
+        self.assertGreaterEqual(result.bubble_diagnostics["bubble_size_cluster_count"], 2)
+
+    def test_nearby_distinct_bubbles_are_not_deduplicated(self):
+        geometry = PageGeometry(
+            1, 300, 200, 0, (0, 0, 300, 200), (0, 0, 300, 200),
+            "raw", "synthetic", shapes=[ellipse(100, 100, 20), ellipse(132, 100, 20)],
+        )
+        result = detect_grid_system(
+            "drawing.pdf", geometry, [text("A", 95, 95), text("B", 127, 95)]
+        )
+        self.assertEqual(result.bubble_diagnostics["deduplicated_bubble_candidate_count"], 2)
+        self.assertEqual({label.normalized_label for label in result.unassigned_labels}, {"A", "B"})
+
+    def test_decorative_circles_without_grid_labels_produce_no_grid(self):
+        geometry = PageGeometry(
+            1, 300, 200, 0, (0, 0, 300, 200), (0, 0, 300, 200),
+            "raw", "synthetic", shapes=[ellipse(50 + index * 20, 100, 12) for index in range(10)],
+        )
+        result = detect_grid_system("drawing.pdf", geometry, [text("LOGO", 20, 20)])
+        self.assertEqual((result.horizontal_axes, result.vertical_axes), ([], []))
+        self.assertIn("NO_DOMINANT_GRID_SYSTEM", result.warnings)
+
+    def test_one_text_item_with_multiple_shape_alternatives_cannot_imply_repetition(self):
+        shapes = [
+            ellipse(100, 100, 20), ellipse(107, 100, 20),
+            ellipse(100, 200, 20), ellipse(100, 300, 20),
+        ]
+        items = [text("1", 95, 95), text("2", 95, 195), text("3", 95, 295)]
+        geometry = PageGeometry(
+            1, 400, 400, 0, (0, 0, 400, 400), (0, 0, 400, 400),
+            "raw", "synthetic",
+            lines=[
+                LineSegment(1, 40, 100, 360, 100),
+                LineSegment(1, 40, 200, 360, 200),
+                LineSegment(1, 40, 300, 360, 300),
+            ],
+            shapes=shapes,
+        )
+        result = detect_grid_system("drawing.pdf", geometry, items)
+        axis = next(value for value in result.horizontal_axes if value.normalized_label == "1")
+        self.assertEqual(len(axis.label_candidates), 1)
+        self.assertNotIn("LABEL_REPEATED_AT_OPPOSITE_ENDS", axis.evidence)
+        self.assertEqual(axis.label_candidates[0].bubble_alternative_count, 1)
 
     def test_collinear_dashed_and_slightly_rotated_segments_merge(self):
         axis = next(value for value in self.grid.vertical_axes if value.normalized_label == "B")

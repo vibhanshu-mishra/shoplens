@@ -888,14 +888,31 @@ def _run_grid_system(args: argparse.Namespace) -> int:
         print(f"Coordinate conversion: {geometry.conversion}")
         print(f"Line candidates: {len(geometry.lines)}")
         print(f"Shape candidates: {len(geometry.shapes)}")
+        print(
+            "Bubble candidates: "
+            f"raw={grid.bubble_diagnostics.get('raw_bubble_candidate_count', 0)} | "
+            f"deduplicated={grid.bubble_diagnostics.get('deduplicated_bubble_candidate_count', 0)} | "
+            f"suppressed={grid.bubble_diagnostics.get('suppressed_duplicate_bubble_count', 0)}"
+        )
         for axis in grid.vertical_axes + grid.horizontal_axes:
             print(
                 f"Axis {axis.axis_id} | segments={len(axis.source_segments)} | "
                 f"extent=({axis.start_x:.2f},{axis.start_y:.2f})-({axis.end_x:.2f},{axis.end_y:.2f}) | "
                 f"evidence={','.join(axis.evidence)}"
             )
+            for label in axis.label_candidates:
+                print(
+                    f"  Label observation: {label.observation_id} | "
+                    f"text={label.normalized_label} | "
+                    f"bubble alternatives={label.bubble_alternative_count}"
+                )
         for label in grid.unassigned_labels:
-            print(f"Unassigned label: {label.normalized_label} at ({label.center_x:.2f},{label.center_y:.2f})")
+            print(
+                f"Unassigned label: {label.normalized_label} at "
+                f"({label.center_x:.2f},{label.center_y:.2f}) | "
+                f"observation={label.observation_id} | "
+                f"bubble alternatives={label.bubble_alternative_count}"
+            )
         for candidate in grid.rejected_candidates:
             print(f"Rejected candidate: {candidate.original_text or '[empty]'} | reason={candidate.reason} | x={candidate.x:.2f} y={candidate.y:.2f}")
         for warning in grid.warnings:
