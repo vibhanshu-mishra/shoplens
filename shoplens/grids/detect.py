@@ -31,7 +31,7 @@ def detect_grid_system(
     sheet: Optional[ClassifiedSheet] = None,
 ) -> GridSystem:
     items = [item for item in text_items if int(item.page) == geometry.pdf_page]
-    labels, rejected = _bubble_labels(geometry, items)
+    labels, rejected, bubble_diagnostics = _bubble_labels(geometry, items)
     x_groups = _aligned_groups(labels, "x")
     y_groups = _aligned_groups(labels, "y")
     horizontal, horizontal_labels, multiple_horizontal = _select_axis_group(
@@ -68,6 +68,7 @@ def detect_grid_system(
         rejected_candidates=rejected,
         confidence=confidence,
         warnings=list(dict.fromkeys(warnings)),
+        bubble_diagnostics=bubble_diagnostics,
     )
 
 
@@ -85,20 +86,22 @@ def _attach_matching_labels(axes: Sequence[GridAxis], labels: Sequence[GridLabel
             if abs(coordinate - axis.coordinate) <= 8.0:
                 axis.label_candidates.append(label)
                 attached.add(id(label))
-        if len(axis.label_candidates) > 1 and "LABEL_REPEATED_AT_OPPOSITE_ENDS" not in axis.evidence:
+        if (
+            _distinct_observation_count(axis.label_candidates) > 1
+            and "LABEL_REPEATED_AT_OPPOSITE_ENDS" not in axis.evidence
+        ):
             axis.evidence.append("LABEL_REPEATED_AT_OPPOSITE_ENDS")
 
 
 def _bubble_labels(
     geometry: PageGeometry, items: Sequence[Any]
-) -> Tuple[List[GridLabel], List[RejectedGridCandidate]]:
-    ellipses = [shape for shape in geometry.shapes if shape.kind == "ELLIPSE"]
-    sizes = [min(_shape_size(shape)) for shape in ellipses if min(_shape_size(shape)) > 5]
-    typical = median(sizes) if sizes else 0.0
-    labels: List[GridLabel] = []
+) -> Tuple[List[GridLabel], List[RejectedGridCandidate], Dict[str, int]]:
+    raw_ellipses = [shape for shape in geometry.shapes if shape.kind == "ELLIPSE"]
+    ellipses = _deduplicate_bubbles(raw_ellipses)
+    size_clusters = _bubble_size_clusters(ellipses)
+    observations: Dict[str, Tuple[int, Any, List[ShapeGeometry]]] = {}
     rejected: List[RejectedGridCandidate] = []
     for shape in ellipses:
-        shape_width, shape_height = _shape_size(shape)
         hits = [item for item in items if _inside(shape, item, 4.0)]
         texts = [str(item.text).strip() for item in hits if str(item.text).strip()]
         candidates = [item for item in hits if GRID_LABEL_RE.fullmatch(_normalize(item.text))]
@@ -115,7 +118,6 @@ def _bubble_labels(
             )
             continue
         candidate = min(candidates, key=lambda item: len(_normalize(item.text)))
-        normalized = _normalize(candidate.text)
         if any(_looks_like_reference(text) for text in texts if text != str(candidate.text).strip()):
             rejected.append(
                 RejectedGridCandidate(
@@ -128,22 +130,21 @@ def _bubble_labels(
                 )
             )
             continue
-        if typical and (min(shape_width, shape_height) > typical * 1.22 or min(shape_width, shape_height) < typical * 0.72):
-            rejected.append(
-                RejectedGridCandidate(
-                    str(candidate.text).strip(),
-                    geometry.pdf_page,
-                    float(candidate.x),
-                    float(candidate.y),
-                    "INCONSISTENT_BUBBLE_SIZE",
-                    [f"TYPICAL_BUBBLE_SIZE:{typical:.2f}"],
-                )
-            )
-            continue
+        source_index = next(index for index, item in enumerate(items) if item is candidate)
+        observation_id = _text_observation_id(geometry.pdf_page, source_index, candidate)
+        if observation_id in observations:
+            observations[observation_id][2].append(shape)
+        else:
+            observations[observation_id] = (source_index, candidate, [shape])
+
+    labels: List[GridLabel] = []
+    for observation_id, (source_index, candidate, shapes) in observations.items():
+        shape = min(shapes, key=lambda value: _bubble_match_rank(value, candidate))
+        size_cluster = size_clusters[id(shape)]
         labels.append(
             GridLabel(
                 original_text=str(candidate.text),
-                normalized_label=normalized,
+                normalized_label=_normalize(candidate.text),
                 page=geometry.pdf_page,
                 x=float(candidate.x),
                 y=float(candidate.y),
@@ -151,10 +152,108 @@ def _bubble_labels(
                 height=float(candidate.height),
                 associated_shape="ELLIPSE",
                 confidence=0.78,
-                evidence=["ELLIPSE_CONTAINMENT", "CONSISTENT_BUBBLE_SIZE"],
+                evidence=[
+                    "ELLIPSE_CONTAINMENT",
+                    "ONE_PHYSICAL_LABEL_OBSERVATION",
+                    f"BUBBLE_SIZE_CLUSTER:{size_cluster}",
+                ],
+                observation_id=observation_id,
+                bubble_alternative_count=len(shapes) - 1,
             )
         )
-    return labels, rejected
+    return labels, rejected, {
+        "raw_bubble_candidate_count": len(raw_ellipses),
+        "deduplicated_bubble_candidate_count": len(ellipses),
+        "suppressed_duplicate_bubble_count": len(raw_ellipses) - len(ellipses),
+        "bubble_size_cluster_count": len(set(size_clusters.values())),
+        "physical_label_observation_count": len(labels),
+        "alternative_bubble_association_count": sum(
+            label.bubble_alternative_count for label in labels
+        ),
+    }
+
+
+def _deduplicate_bubbles(shapes: Sequence[ShapeGeometry]) -> List[ShapeGeometry]:
+    """Collapse repeat vector traces of the same circular bubble, conservatively."""
+
+    retained: List[ShapeGeometry] = []
+    for shape in sorted(shapes, key=lambda value: (value.bounds, value.source)):
+        if any(_same_bubble(shape, existing) for existing in retained):
+            continue
+        retained.append(shape)
+    return retained
+
+
+def _same_bubble(left: ShapeGeometry, right: ShapeGeometry) -> bool:
+    if left.page != right.page or left.source != right.source:
+        return False
+    left_width, left_height = _shape_size(left)
+    right_width, right_height = _shape_size(right)
+    if min(left_width, left_height, right_width, right_height) <= 0:
+        return False
+    left_x = (left.bounds[0] + left.bounds[2]) / 2.0
+    left_y = (left.bounds[1] + left.bounds[3]) / 2.0
+    right_x = (right.bounds[0] + right.bounds[2]) / 2.0
+    right_y = (right.bounds[1] + right.bounds[3]) / 2.0
+    center_tolerance = max(0.75, min(left_width, left_height, right_width, right_height) * 0.18)
+    if abs(left_x - right_x) > center_tolerance or abs(left_y - right_y) > center_tolerance:
+        return False
+    if max(abs(left_width - right_width), abs(left_height - right_height)) > max(
+        1.0, max(left_width, left_height, right_width, right_height) * 0.18
+    ):
+        return False
+    intersection_width = max(0.0, min(left.bounds[2], right.bounds[2]) - max(left.bounds[0], right.bounds[0]))
+    intersection_height = max(0.0, min(left.bounds[3], right.bounds[3]) - max(left.bounds[1], right.bounds[1]))
+    overlap = intersection_width * intersection_height
+    smaller_area = min(left_width * left_height, right_width * right_height)
+    return overlap >= smaller_area * 0.78
+
+
+def _bubble_size_clusters(shapes: Sequence[ShapeGeometry]) -> Dict[int, int]:
+    """Cluster comparable bubble sizes without imposing one page-wide standard."""
+
+    clusters: List[List[float]] = []
+    assignments: Dict[int, int] = {}
+    for shape in sorted(shapes, key=lambda value: min(_shape_size(value))):
+        size = min(_shape_size(shape))
+        cluster_index = next(
+            (
+                index for index, values in enumerate(clusters)
+                if size <= median(values) * 1.25 and size >= median(values) * 0.80
+            ),
+            None,
+        )
+        if cluster_index is None:
+            clusters.append([size])
+            assignments[id(shape)] = len(clusters)
+        else:
+            clusters[cluster_index].append(size)
+            assignments[id(shape)] = cluster_index + 1
+    return assignments
+
+
+def _bubble_match_rank(shape: ShapeGeometry, item: Any) -> Tuple[float, float, float]:
+    width, height = _shape_size(shape)
+    center_x = (shape.bounds[0] + shape.bounds[2]) / 2.0
+    center_y = (shape.bounds[1] + shape.bounds[3]) / 2.0
+    item_x = float(item.x) + float(item.width) / 2.0
+    item_y = float(item.y) + float(item.height) / 2.0
+    offset = ((item_x - center_x) / max(width, 1.0)) ** 2 + ((item_y - center_y) / max(height, 1.0)) ** 2
+    return offset, abs(width - height), -min(width, height)
+
+
+def _text_observation_id(page: int, source_index: int, item: Any) -> str:
+    return ":".join(
+        (
+            str(page),
+            str(source_index),
+            _normalize(item.text),
+            f"{float(item.x):.3f}",
+            f"{float(item.y):.3f}",
+            f"{float(item.width):.3f}",
+            f"{float(item.height):.3f}",
+        )
+    )
 
 
 def _aligned_groups(labels: Sequence[GridLabel], dimension: str) -> List[List[GridLabel]]:
@@ -273,7 +372,8 @@ def _build_axes(
             f"COLLINEAR_SEGMENTS:{len(aligned)}",
             f"SEGMENT_COVERAGE:{covered / span:.3f}",
         ]
-        if len(candidates) > 1:
+        repeated_observations = _distinct_observation_count(candidates)
+        if repeated_observations > 1:
             evidence.append("LABEL_REPEATED_AT_OPPOSITE_ENDS")
         axes.append(
             GridAxis(
@@ -289,7 +389,7 @@ def _build_axes(
                 source_segments=aligned,
                 label_candidates=list(candidates),
                 intersection_count=0,
-                confidence=min(0.94, 0.68 + min(0.16, covered / span * 0.12) + (0.08 if len(candidates) > 1 else 0.0)),
+                confidence=min(0.94, 0.68 + min(0.16, covered / span * 0.12) + (0.08 if repeated_observations > 1 else 0.0)),
                 evidence=evidence,
             )
         )
@@ -399,6 +499,18 @@ def _system_confidence(horizontal: Sequence[GridAxis], vertical: Sequence[GridAx
         return 0.0
     base = sum(axis.confidence for axis in axes) / len(axes)
     return round(min(0.98, base + (0.04 if horizontal and vertical else 0.0)), 3)
+
+
+def _distinct_observation_count(labels: Sequence[GridLabel]) -> int:
+    """Count positioned-text observations, never alternative bubble interpretations."""
+
+    return len({
+        label.observation_id or (
+            f"{label.page}:{label.normalized_label}:{label.x:.3f}:{label.y:.3f}:"
+            f"{label.width:.3f}:{label.height:.3f}"
+        )
+        for label in labels
+    })
 
 
 def _inside(shape: ShapeGeometry, item: Any, tolerance: float) -> bool:
