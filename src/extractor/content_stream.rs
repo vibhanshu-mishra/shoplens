@@ -22,6 +22,11 @@ use super::underline::UnderlineLine;
 use super::xobjects::{extract_form_xobject_text, get_page_xobjects, XObjectType};
 use super::{get_number, image_bbox_from_ctm, multiply_matrices};
 
+// Dense vector drawings can legitimately contain more than one million path
+// operations before their text operators. Keep a finite guard for malformed
+// inputs, while allowing the known 1.1–1.4M-operation drawing pages.
+const MAX_PAGE_OPERATIONS: usize = 2_000_000;
+
 /// Strip PDF comments (% to end of line) from content stream bytes.
 ///
 /// Some PDF generators (e.g. PD4ML) embed comments in content streams that
@@ -242,13 +247,12 @@ pub(crate) fn extract_page_text_items(
 
     let content = Content::decode(&content_data).map_err(|e| PdfError::Parse(e.to_string()))?;
 
-    const MAX_OPERATIONS: usize = 1_000_000;
-    if content.operations.len() > MAX_OPERATIONS {
+    if content.operations.len() > MAX_PAGE_OPERATIONS {
         log::warn!(
             "page {}: skipping extraction — {} operations exceeds limit ({})",
             page_num,
             content.operations.len(),
-            MAX_OPERATIONS
+            MAX_PAGE_OPERATIONS
         );
         return Ok(((Vec::new(), Vec::new(), Vec::new()), false, false));
     }
@@ -865,6 +869,8 @@ pub(crate) fn extract_page_text_items(
                                         page_num,
                                         font_cmaps,
                                         &ctm,
+                                        &fonts,
+                                        &xobjects,
                                         &mut cmap_decisions,
                                         style_cache,
                                     );
@@ -1678,14 +1684,24 @@ BT /F1 12 Tf 0 1 -1 0 240 100 Tm (WORLD) Tj ET
     }
 
     #[test]
+    fn dense_page_under_limit_preserves_text() {
+        let mut content = "0 0 m\n".repeat(1_300_000).into_bytes();
+        content.extend_from_slice(b"BT /F1 12 Tf 100 700 Td (DENSE PAGE) Tj ET");
+
+        let items = extract_simple_items(&content);
+
+        assert!(items.iter().any(|item| item.text == "DENSE PAGE"));
+    }
+
+    #[test]
     fn test_skip_excessive_operations() {
         use crate::tounicode::FontCMaps;
         use lopdf::{dictionary, Object, Stream};
 
         let mut doc = lopdf::Document::new();
 
-        // "0 0 m\n" = 6 bytes per op, 1_100_000 ops → ~6.6 MB content stream
-        let ops_bytes = "0 0 m\n".repeat(1_100_000).into_bytes();
+        // "0 0 m\n" = 6 bytes per op, 2_100_000 ops → ~12.6 MB content stream
+        let ops_bytes = "0 0 m\n".repeat(2_100_000).into_bytes();
         let stream = Stream::new(dictionary! {}, ops_bytes);
         let content_id = doc.add_object(Object::Stream(stream));
 

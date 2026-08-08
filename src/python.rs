@@ -12,7 +12,7 @@ use crate::types::{ItemType, PageGeometry, PdfLine, PdfRect};
 // ---------------------------------------------------------------------------
 
 /// Result of processing a PDF file.
-#[pyclass(name = "PdfResult")]
+#[pyclass(name = "PdfResult", from_py_object)]
 #[derive(Clone)]
 pub struct PyPdfResult {
     /// The detected PDF type: "text_based", "scanned", "image_based", or "mixed".
@@ -64,7 +64,7 @@ impl PyPdfResult {
 }
 
 /// OCR reasons for a single 1-indexed page.
-#[pyclass(name = "PageOcrReasons")]
+#[pyclass(name = "PageOcrReasons", from_py_object)]
 #[derive(Clone)]
 pub struct PyPageOcrReasons {
     /// 1-indexed page number.
@@ -90,7 +90,7 @@ impl PyPageOcrReasons {
 // ---------------------------------------------------------------------------
 
 /// Lightweight PDF classification result.
-#[pyclass(name = "PdfClassification")]
+#[pyclass(name = "PdfClassification", from_py_object)]
 #[derive(Clone)]
 pub struct PyPdfClassification {
     /// The detected PDF type: "text_based", "scanned", "image_based", or "mixed".
@@ -122,7 +122,7 @@ impl PyPdfClassification {
 // ---------------------------------------------------------------------------
 
 /// Extracted text for a single region.
-#[pyclass(name = "RegionText")]
+#[pyclass(name = "RegionText", from_py_object)]
 #[derive(Clone)]
 pub struct PyRegionText {
     /// Extracted text content.
@@ -148,7 +148,7 @@ impl PyRegionText {
 }
 
 /// Extracted text for one page's regions.
-#[pyclass(name = "PageRegionTexts")]
+#[pyclass(name = "PageRegionTexts", from_py_object)]
 #[derive(Clone)]
 pub struct PyPageRegionTexts {
     /// 0-indexed page number.
@@ -175,7 +175,7 @@ impl PyPageRegionTexts {
 // ---------------------------------------------------------------------------
 
 /// Per-page markdown extraction result.
-#[pyclass(name = "PageMarkdown")]
+#[pyclass(name = "PageMarkdown", from_py_object)]
 #[derive(Clone)]
 pub struct PyPageMarkdown {
     /// 0-indexed page number.
@@ -206,7 +206,7 @@ impl PyPageMarkdown {
 }
 
 /// Combined per-page markdown extraction and layout classification result.
-#[pyclass(name = "PagesExtractionResult")]
+#[pyclass(name = "PagesExtractionResult", from_py_object)]
 #[derive(Clone)]
 pub struct PyPagesExtractionResult {
     /// Per-page markdown results, in the order requested.
@@ -242,7 +242,7 @@ impl PyPagesExtractionResult {
 }
 
 /// A positioned text item extracted from a PDF.
-#[pyclass(name = "TextItem")]
+#[pyclass(name = "TextItem", from_py_object)]
 #[derive(Clone)]
 pub struct PyTextItem {
     #[pyo3(get)]
@@ -274,7 +274,7 @@ pub struct PyTextItem {
 }
 
 /// A vector line segment in extracted PDF user-space coordinates.
-#[pyclass(name = "GeometryLine")]
+#[pyclass(name = "GeometryLine", from_py_object)]
 #[derive(Clone)]
 pub struct PyGeometryLine {
     #[pyo3(get)]
@@ -290,7 +290,7 @@ pub struct PyGeometryLine {
 }
 
 /// A rectangle emitted by a PDF `re` path operator.
-#[pyclass(name = "GeometryRectangle")]
+#[pyclass(name = "GeometryRectangle", from_py_object)]
 #[derive(Clone)]
 pub struct PyGeometryRectangle {
     #[pyo3(get)]
@@ -306,7 +306,7 @@ pub struct PyGeometryRectangle {
 }
 
 /// Page boxes and vector geometry in the same coordinates as `TextItem`.
-#[pyclass(name = "PageGeometry")]
+#[pyclass(name = "PageGeometry", from_py_object)]
 #[derive(Clone)]
 pub struct PyPageGeometry {
     #[pyo3(get)]
@@ -408,12 +408,28 @@ fn convert_text_items(items: Vec<crate::TextItem>) -> Vec<PyTextItem> {
             height: item.height,
             font: item.font,
             font_size: item.font_size,
-            page: item.page,
+            // The Python API uses zero-based page indexes, consistently with
+            // extract_pages_markdown and extract_text_in_regions. The Rust
+            // extractor uses one-based page numbers internally.
+            page: item.page.saturating_sub(1),
             is_bold: item.is_bold,
             is_italic: item.is_italic,
             is_underline: item.is_underline,
             is_strikeout: item.is_strikeout,
             item_type: item_type_str(&item.item_type),
+        })
+        .collect()
+}
+
+fn one_based_page_filter(pages: Vec<u32>) -> PyResult<HashSet<u32>> {
+    pages
+        .into_iter()
+        .map(|page| {
+            page.checked_add(1).ok_or_else(|| {
+                PyValueError::new_err(
+                    "page index is too large to convert to an internal page number",
+                )
+            })
         })
         .collect()
 }
@@ -565,12 +581,15 @@ fn extract_text_bytes(data: &[u8]) -> PyResult<String> {
 }
 
 /// Extract text with position information from a file.
+///
+/// `pages`, when supplied, uses zero-based page indexes. Returned item page
+/// values use the same convention.
 #[pyfunction]
 #[pyo3(signature = (path, pages=None))]
 fn extract_text_with_positions(path: &str, pages: Option<Vec<u32>>) -> PyResult<Vec<PyTextItem>> {
     let items = match pages {
         Some(p) => {
-            let page_set: HashSet<u32> = p.into_iter().collect();
+            let page_set = one_based_page_filter(p)?;
             crate::extract_text_with_positions_pages(path, Some(&page_set)).map_err(to_py_err)?
         }
         None => crate::extract_text_with_positions(path).map_err(to_py_err)?,
@@ -579,6 +598,9 @@ fn extract_text_with_positions(path: &str, pages: Option<Vec<u32>>) -> PyResult<
 }
 
 /// Extract text with position information from bytes.
+///
+/// `pages`, when supplied, uses zero-based page indexes. Returned item page
+/// values use the same convention.
 #[pyfunction]
 #[pyo3(signature = (data, pages=None))]
 fn extract_text_with_positions_bytes(
@@ -587,7 +609,7 @@ fn extract_text_with_positions_bytes(
 ) -> PyResult<Vec<PyTextItem>> {
     let items = match pages {
         Some(p) => {
-            let page_set: HashSet<u32> = p.into_iter().collect();
+            let page_set = one_based_page_filter(p)?;
             crate::extractor::extract_text_with_positions_mem_pages(data, Some(&page_set))
                 .map_err(to_py_err)?
         }

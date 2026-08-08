@@ -184,6 +184,13 @@ class TestExtractTextWithPositions:
         assert len(items) > 0
         assert all(item.page == 1 for item in items)
 
+    def test_zero_indexed_first_page(self):
+        items = pdf_inspector.extract_text_with_positions(
+            fixture_path("thermo-freon12.pdf"), pages=[0]
+        )
+        assert len(items) > 0
+        assert all(item.page == 0 for item in items)
+
     def test_repr(self):
         items = pdf_inspector.extract_text_with_positions(
             fixture_path("thermo-freon12.pdf")
@@ -202,6 +209,12 @@ class TestExtractTextWithPositions:
         items = pdf_inspector.extract_text_with_positions_bytes(data, pages=[1])
         assert len(items) > 0
         assert all(item.page == 1 for item in items)
+
+    def test_bytes_zero_indexed_first_page(self):
+        data = fixture_bytes("thermo-freon12.pdf")
+        items = pdf_inspector.extract_text_with_positions_bytes(data, pages=[0])
+        assert len(items) > 0
+        assert all(item.page == 0 for item in items)
 
 
 class TestExtractPageGeometry:
