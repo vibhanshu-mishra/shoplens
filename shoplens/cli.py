@@ -830,12 +830,10 @@ def _run_grid_system(args: argparse.Namespace) -> int:
     package = build_package_index(reconcile_sheets(declared, actual))
     selected = None
     if args.sheet:
-        normalized = args.sheet.strip().upper()
-        selected = next((sheet for sheet in package.sheets if sheet.sheet_number == normalized), None)
-        if selected is None:
-            print(f"Error: sheet {normalized} was not found in the package index.", file=sys.stderr)
+        selected, page, error = _resolve_grid_sheet(package.sheets, args.sheet)
+        if error:
+            print(f"Error: {error}", file=sys.stderr)
             return 7
-        page = selected.pdf_page
     else:
         page = args.page
         selected = next((sheet for sheet in package.sheets if page in sheet.actual_pdf_pages), None)
@@ -920,6 +918,24 @@ def _run_grid_system(args: argparse.Namespace) -> int:
     if args.svg:
         print(f"SVG export: {args.svg}")
     return 0
+
+
+def _resolve_grid_sheet(sheets, sheet_number: str):
+    """Resolve one unambiguous indexed sheet to its trustworthy PDF page."""
+
+    normalized = sheet_number.strip().upper()
+    matches = [sheet for sheet in sheets if sheet.sheet_number == normalized]
+    if not matches:
+        return None, None, f"sheet {normalized} was not found in the package index."
+    if len(matches) != 1:
+        return None, None, f"sheet {normalized} is ambiguous in the package index."
+    selected = matches[0]
+    pages = sorted(set(selected.actual_pdf_pages or (
+        [selected.pdf_page] if selected.pdf_page is not None else []
+    )))
+    if len(pages) != 1:
+        return None, None, f"sheet {normalized} does not have one unambiguous PDF page."
+    return selected, pages[0], None
 
 
 def _run_grid_locate_sections(args: argparse.Namespace) -> int:
