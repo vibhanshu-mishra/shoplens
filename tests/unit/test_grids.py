@@ -4,7 +4,8 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,6 +23,7 @@ from shoplens.geometry.adapter import _deduplicate_lines
 from shoplens.geometry.transforms import to_positioned_coordinates, transform_box
 from shoplens.grids import detect_grid_system, export_grid_svg
 from shoplens.grids.detect import GRID_LABEL_RE
+from shoplens.title_blocks.models import SheetRecordSource
 
 
 def text(value, x, y, width=10.0, height=10.0, page=1):
@@ -282,27 +284,76 @@ class GridDetectionTests(unittest.TestCase):
 
 
 class GridCliTests(unittest.TestCase):
-    def run_cli(self, options):
+    def run_cli(self, options, sheets=None):
         geometry, items = regular_geometry_and_text()
-        sheet = classified_sheet()
+        sheets = sheets if sheets is not None else [classified_sheet()]
+        if len(sheets) == 1 and sheets[0].actual_pdf_pages:
+            geometry = replace(geometry, pdf_page=sheets[0].actual_pdf_pages[0])
         output = io.StringIO()
-        with patch.object(cli, "_extract_package_title_blocks_with_items", return_value=(object(), object(), items, 0)), patch.object(cli, "reconcile_sheets", return_value=object()), patch.object(cli, "build_package_index", return_value=SimpleNamespace(sheets=[sheet])), patch.object(cli, "extract_page_geometry", return_value=[geometry]):
-            with redirect_stdout(output):
+        errors = io.StringIO()
+        with patch.object(cli, "_extract_package_title_blocks_with_items", return_value=(object(), object(), items, 0)), patch.object(cli, "reconcile_sheets", return_value=object()), patch.object(cli, "build_package_index", return_value=SimpleNamespace(sheets=sheets)), patch.object(cli, "extract_page_geometry", return_value=[geometry]):
+            with redirect_stdout(output), redirect_stderr(errors):
                 status = cli.main(["grid-system", "drawing.pdf"] + options)
-        return status, output.getvalue()
+        return status, output.getvalue(), errors.getvalue()
 
     def test_sheet_lookup_and_readable_list(self):
-        status, output = self.run_cli(["--sheet", "s1-20a", "--list"])
+        status, output, _ = self.run_cli(["--sheet", "s1-20a", "--list"])
         self.assertEqual(status, 0)
         self.assertIn("Sheet: S1-20A", output)
         self.assertIn("VERTICAL | A", output)
 
     def test_page_lookup_and_json(self):
-        status, output = self.run_cli(["--page", "1", "--json"])
+        status, output, _ = self.run_cli(["--page", "1", "--json"])
         payload = json.loads(output)
         self.assertEqual(status, 0)
         self.assertEqual(payload["pdf_page"], 1)
         self.assertEqual(payload["sheet_number"], "S1-20A")
+
+    def test_title_block_only_sheet_resolves_by_sheet_number(self):
+        sheet = replace(
+            classified_sheet(page=7, number="S103A"),
+            declared_title=None,
+            actual_title="LEVEL 3 BURN TOWER FRAMING PLAN - PART A",
+            record_source=SheetRecordSource.TITLE_BLOCK_ONLY,
+        )
+        status, output, errors = self.run_cli(["--sheet", "S103A"], [sheet])
+        self.assertEqual(status, 0)
+        self.assertEqual(errors, "")
+        self.assertIn("Sheet: S103A", output)
+        self.assertIn("PDF page: 7", output)
+
+    def test_unknown_title_block_only_sheet_still_resolves_by_page(self):
+        sheet = replace(
+            classified_sheet(page=7, number="S103A"),
+            sheet_kind=SheetKind.UNKNOWN,
+            subject=StructuralSubject.UNKNOWN,
+            record_source=SheetRecordSource.TITLE_BLOCK_ONLY,
+        )
+        status, output, errors = self.run_cli(["--sheet", "S103A"], [sheet])
+        self.assertEqual(status, 0)
+        self.assertEqual(errors, "")
+        self.assertIn("Sheet: S103A", output)
+
+    def test_duplicate_sheet_number_is_ambiguous(self):
+        sheets = [classified_sheet(page=1, number="S103A"), classified_sheet(page=2, number="S103A")]
+        status, output, errors = self.run_cli(["--sheet", "S103A"], sheets)
+        self.assertEqual(status, 7)
+        self.assertEqual(output, "")
+        self.assertIn("sheet S103A is ambiguous", errors)
+
+    def test_multiple_pages_for_one_sheet_number_is_ambiguous(self):
+        sheet = replace(classified_sheet(page=1, number="S103A"), actual_pdf_pages=[1, 2])
+        status, output, errors = self.run_cli(["--sheet", "S103A"], [sheet])
+        self.assertEqual(status, 7)
+        self.assertEqual(output, "")
+        self.assertIn("does not have one unambiguous PDF page", errors)
+
+    def test_missing_page_remains_unresolved(self):
+        sheet = replace(classified_sheet(page=1, number="S103A"), pdf_page=None, actual_pdf_pages=[])
+        status, output, errors = self.run_cli(["--sheet", "S103A"], [sheet])
+        self.assertEqual(status, 7)
+        self.assertEqual(output, "")
+        self.assertIn("does not have one unambiguous PDF page", errors)
 
     def test_selector_is_required(self):
         with self.assertRaises(SystemExit):
