@@ -418,6 +418,84 @@ class GridDetectionTests(unittest.TestCase):
             grid_segments,
         )
 
+    def test_tiny_collinear_strokes_cannot_bridge_separate_horizontal_extents(self):
+        left = [
+            LineSegment(1, 0.0, 20.0, 200.0, 20.0, source="left-1"),
+            LineSegment(1, 210.0, 20.0, 410.0, 20.0, source="left-2"),
+        ]
+        right = [
+            LineSegment(1, 700.0, 20.0, 900.0, 20.0, source="right-1"),
+            LineSegment(1, 910.0, 20.0, 1110.0, 20.0, source="right-2"),
+        ]
+        bridge = [
+            LineSegment(1, 430.0 + index * 20.0, 20.0, 435.0 + index * 20.0, 20.0)
+            for index in range(13)
+        ]
+
+        components = _line_extent_components(
+            [*left, *bridge, *right], GridOrientation.HORIZONTAL,
+        )
+        substantial_components = [
+            component
+            for component in components
+            if any(line.length >= 20.0 for line in component)
+        ]
+
+        self.assertEqual(substantial_components, [left, right])
+        self.assertIn(bridge, components)
+
+    def test_tiny_collinear_strokes_cannot_bridge_separate_vertical_extents(self):
+        lower = [
+            LineSegment(1, 20.0, 0.0, 20.0, 200.0, source="lower-1"),
+            LineSegment(1, 20.0, 210.0, 20.0, 410.0, source="lower-2"),
+        ]
+        upper = [
+            LineSegment(1, 20.0, 700.0, 20.0, 900.0, source="upper-1"),
+            LineSegment(1, 20.0, 910.0, 20.0, 1110.0, source="upper-2"),
+        ]
+        bridge = [
+            LineSegment(1, 20.0, 430.0 + index * 20.0, 20.0, 435.0 + index * 20.0)
+            for index in range(13)
+        ]
+
+        components = _line_extent_components(
+            [*lower, *bridge, *upper], GridOrientation.VERTICAL,
+        )
+        substantial_components = [
+            component
+            for component in components
+            if any(line.length >= 20.0 for line in component)
+        ]
+
+        self.assertEqual(substantial_components, [lower, upper])
+        self.assertIn(bridge, components)
+
+    def test_minor_segments_attach_locally_without_breaking_continuous_axis(self):
+        axis = [
+            LineSegment(1, 0.0, 20.0, 200.0, 20.0),
+            LineSegment(1, 230.0, 20.0, 430.0, 20.0),
+        ]
+        local_detail = LineSegment(1, 445.0, 20.0, 450.0, 20.0)
+
+        self.assertEqual(
+            _line_extent_components(
+                [*axis, local_detail], GridOrientation.HORIZONTAL,
+            ),
+            [[*axis, local_detail]],
+        )
+
+    def test_degenerate_minor_only_input_has_conservative_empty_fallback(self):
+        self.assertEqual(
+            _line_extent_components(
+                [
+                    LineSegment(1, 10.0, 20.0, 10.0, 20.0),
+                    LineSegment(1, 20.0, 20.0, 20.0, 20.0),
+                ],
+                GridOrientation.HORIZONTAL,
+            ),
+            [],
+        )
+
     def test_svg_export_contains_geometry_only(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "grid.svg"

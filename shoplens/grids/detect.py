@@ -587,7 +587,7 @@ def _matching_line_component(
 def _line_extent_components(
     lines: Sequence[LineSegment], orientation: GridOrientation
 ) -> List[List[LineSegment]]:
-    """Split collinear drafting geometry only at gaps large relative to its segments."""
+    """Split collinear drafting geometry without letting minor strokes bridge grids."""
 
     intervals = []
     for line in lines:
@@ -597,11 +597,68 @@ def _line_extent_components(
     if not intervals:
         return []
     lengths = [high - low for low, high, _ in intervals]
+    max_length = max(lengths)
     substantial_lengths = [
-        length for length in lengths if length >= max(lengths) * 0.10
+        length for length in lengths if length >= max_length * 0.10
+    ]
+    substantial_intervals = [
+        interval for interval in intervals if interval[1] - interval[0] >= max_length * 0.10
     ]
     typical_length = median(substantial_lengths or lengths)
     continuity_gap = max(ORIENTATION_TOLERANCE * 2.0, typical_length * 0.20)
+
+    # The relative threshold makes the longest interval substantial whenever
+    # there is usable geometry. Keep this defensive fallback so malformed or
+    # future interval selection cannot silently discard all short geometry.
+    if not substantial_intervals:
+        return _interval_components(intervals, continuity_gap)
+
+    substantial_components = _interval_components(
+        substantial_intervals, continuity_gap
+    )
+    component_bounds = [
+        _component_extent(component, orientation)
+        for component in substantial_components
+    ]
+    attachments: List[List[LineSegment]] = [
+        [] for _ in substantial_components
+    ]
+    substantial_ids = {id(line) for _, _, line in substantial_intervals}
+    minor_intervals = [
+        interval for interval in intervals if id(interval[2]) not in substantial_ids
+    ]
+    unassigned_minor_components = []
+    for minor_component in _interval_components(minor_intervals, continuity_gap):
+        low, high = _component_extent(minor_component, orientation)
+        compatible = [
+            (index, _interval_distance(low, high, start, end))
+            for index, (start, end) in enumerate(component_bounds)
+            if _interval_distance(low, high, start, end) <= continuity_gap
+        ]
+        if len(compatible) == 1:
+            attachments[compatible[0][0]].extend(minor_component)
+        else:
+            # A minor run compatible with two structural components could be a
+            # detail-stroke bridge. Keep it available as geometry, but never
+            # use it to extend either component toward the other.
+            unassigned_minor_components.append(minor_component)
+
+    components = [
+        component + attached
+        for component, attached in zip(substantial_components, attachments)
+    ]
+    components.extend(unassigned_minor_components)
+    return sorted(
+        components,
+        key=lambda component: _component_extent(component, orientation)[0],
+    )
+
+
+def _interval_components(
+    intervals: Sequence[Tuple[float, float, LineSegment]], continuity_gap: float
+) -> List[List[LineSegment]]:
+    """Partition sorted projected intervals using the established gap tolerance."""
+
     components: List[List[LineSegment]] = []
     current: List[LineSegment] = []
     current_high: Optional[float] = None
@@ -615,6 +672,12 @@ def _line_extent_components(
     if current:
         components.append(current)
     return components
+
+
+def _interval_distance(low: float, high: float, start: float, end: float) -> float:
+    """Return the gap between two projected intervals, or zero when they overlap."""
+
+    return max(start - high, low - end, 0.0)
 
 
 def _labels_near_component(
