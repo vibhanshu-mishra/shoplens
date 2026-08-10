@@ -136,6 +136,27 @@ class LocalizationTests(unittest.TestCase):
         self.assertEqual(item.grid_system_id, "PAGE_1_SECONDARY_GRID_1")
         self.assertEqual(result.outside_grid_count, 0)
 
+    def test_localization_json_grid_systems_is_flat_while_primary_keeps_hierarchy(self):
+        primary = grid()
+        primary.grid_system_id = "PAGE_1_DOMINANT_GRID"
+        secondary_one = grid()
+        secondary_one.grid_system_id = "PAGE_1_SECONDARY_GRID_1"
+        secondary_two = grid()
+        secondary_two.grid_system_id = "PAGE_1_SECONDARY_GRID_2"
+        primary.secondary_grid_systems = [secondary_one, secondary_two]
+        payload = localize_section_detections("drawing.pdf", [], primary).to_dict()
+        self.assertEqual(
+            [item["grid_system_id"] for item in payload["grid_systems"]],
+            ["PAGE_1_DOMINANT_GRID", "PAGE_1_SECONDARY_GRID_1", "PAGE_1_SECONDARY_GRID_2"],
+        )
+        self.assertTrue(all(
+            not item["secondary_grid_systems"] for item in payload["grid_systems"]
+        ))
+        self.assertEqual(
+            [item["grid_system_id"] for item in payload["grid_system"]["secondary_grid_systems"]],
+            ["PAGE_1_SECONDARY_GRID_1", "PAGE_1_SECONDARY_GRID_2"],
+        )
+
     def test_summary_raw_mode_counts(self):
         records = [detection(), detection(x=490, y=490)]
         result = localize_section_detections("drawing.pdf", records, grid(), record_mode="raw")

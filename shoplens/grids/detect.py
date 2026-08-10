@@ -43,6 +43,7 @@ def detect_grid_system(
     candidates = _coherent_system_candidates(horizontal_groups, vertical_groups)
     multiple_horizontal = len(horizontal_groups) > 1
     multiple_vertical = len(vertical_groups) > 1
+    coherent_system_count = len(candidates)
     if candidates:
         horizontal, vertical = candidates[0][0], candidates[0][1]
     else:
@@ -52,7 +53,9 @@ def detect_grid_system(
         vertical, _, multiple_vertical = _select_axis_group(
             GridOrientation.VERTICAL, y_groups, geometry.lines, geometry
         )
-        candidates = [(horizontal, vertical, 0)] if horizontal or vertical else []
+        if horizontal or vertical:
+            _set_intersections(horizontal, vertical)
+            candidates = [(horizontal, vertical, _intersection_total(horizontal, vertical))]
     selected_axes = [axis for axes, _, _ in candidates for axis in axes] + [
         axis for _, axes, _ in candidates for axis in axes
     ]
@@ -67,9 +70,11 @@ def detect_grid_system(
     warnings = list(geometry.warnings)
     if not horizontal and not vertical:
         warnings.append("NO_DOMINANT_GRID_SYSTEM")
-    if len(candidates) > 1:
+    if coherent_system_count > 1:
         warnings.append("MULTIPLE_GRID_SYSTEMS_DETECTED")
-    if multiple_horizontal or multiple_vertical or len(candidates) > 1:
+    if coherent_system_count > 1:
+        warnings.append("MULTIPLE_SIMILAR_GRID_SYSTEMS")
+    elif not coherent_system_count and (multiple_horizontal or multiple_vertical):
         warnings.append("MULTIPLE_SIMILAR_GRID_SYSTEMS")
     confidence = _system_confidence(horizontal, vertical)
     primary = GridSystem(
@@ -480,8 +485,11 @@ def _build_axes(
             span = geometry.width if orientation == GridOrientation.HORIZONTAL else geometry.height
             if not aligned:
                 continue
+            component = _matching_line_component(aligned, orientation, label_cluster)
+            if component is None:
+                continue
             if orientation == GridOrientation.HORIZONTAL:
-                starts = [value for line in aligned for value in (line.x1, line.x2)]
+                starts = [value for line in component for value in (line.x1, line.x2)]
                 start_x, end_x = min(starts), max(starts)
                 start_x, end_x = _cap_extent_to_labels(
                     start_x,
@@ -491,7 +499,7 @@ def _build_axes(
                 )
                 start_y = end_y = coordinate
             else:
-                starts = [value for line in aligned for value in (line.y1, line.y2)]
+                starts = [value for line in component for value in (line.y1, line.y2)]
                 start_y, end_y = min(starts), max(starts)
                 start_y, end_y = _cap_extent_to_labels(
                     start_y,
@@ -500,12 +508,12 @@ def _build_axes(
                     (geometry.crop_box[1] + geometry.crop_box[3]) / 2.0,
                 )
                 start_x = end_x = coordinate
-            covered = _covered_length(aligned, orientation, (start_x, end_x, start_y, end_y))
+            covered = _covered_length(component, orientation, (start_x, end_x, start_y, end_y))
             if covered < span * 0.04:
                 continue
             evidence = [
                 "ALIGNED_GRID_LABEL_BUBBLES",
-                f"COLLINEAR_SEGMENTS:{len(aligned)}",
+                f"COLLINEAR_SEGMENTS:{len(component)}",
                 f"SEGMENT_COVERAGE:{covered / span:.3f}",
             ]
             repeated_observations = _distinct_observation_count(label_cluster)
@@ -523,7 +531,7 @@ def _build_axes(
                     start_y=start_y,
                     end_x=end_x,
                     end_y=end_y,
-                    source_segments=aligned,
+                    source_segments=component,
                     label_candidates=list(label_cluster),
                     intersection_count=0,
                     confidence=min(0.94, 0.68 + min(0.16, covered / span * 0.12) + (0.08 if repeated_observations > 1 else 0.0)),
@@ -550,6 +558,87 @@ def _spatial_label_clusters(
         else:
             clusters.append([label])
     return clusters
+
+
+def _matching_line_component(
+    lines: Sequence[LineSegment],
+    orientation: GridOrientation,
+    labels: Sequence[GridLabel],
+) -> Optional[List[LineSegment]]:
+    """Select the continuous projected line extent supported by this label cluster."""
+
+    components = _line_extent_components(lines, orientation)
+    if not components:
+        return None
+    positions = [
+        label.center_x if orientation == GridOrientation.HORIZONTAL else label.center_y
+        for label in labels
+    ]
+    return max(
+        components,
+        key=lambda component: (
+            _labels_near_component(positions, component, orientation),
+            -_component_distance(positions, component, orientation),
+            _covered_length(component, orientation),
+        ),
+    )
+
+
+def _line_extent_components(
+    lines: Sequence[LineSegment], orientation: GridOrientation
+) -> List[List[LineSegment]]:
+    """Split collinear drafting geometry only at gaps large relative to its segments."""
+
+    intervals = []
+    for line in lines:
+        low, high = sorted((line.x1, line.x2) if orientation == GridOrientation.HORIZONTAL else (line.y1, line.y2))
+        if high > low:
+            intervals.append((low, high, line))
+    if not intervals:
+        return []
+    lengths = [high - low for low, high, _ in intervals]
+    substantial_lengths = [
+        length for length in lengths if length >= max(lengths) * 0.10
+    ]
+    typical_length = median(substantial_lengths or lengths)
+    continuity_gap = max(ORIENTATION_TOLERANCE * 2.0, typical_length * 0.20)
+    components: List[List[LineSegment]] = []
+    current: List[LineSegment] = []
+    current_high: Optional[float] = None
+    for low, high, line in sorted(intervals, key=lambda value: (value[0], value[1])):
+        if current and current_high is not None and low > current_high + continuity_gap:
+            components.append(current)
+            current = []
+            current_high = None
+        current.append(line)
+        current_high = high if current_high is None else max(current_high, high)
+    if current:
+        components.append(current)
+    return components
+
+
+def _labels_near_component(
+    positions: Sequence[float], component: Sequence[LineSegment], orientation: GridOrientation
+) -> int:
+    low, high = _component_extent(component, orientation)
+    tolerance = max(ALIGNMENT_TOLERANCE * 2.0, (high - low) * 0.12)
+    return sum(low - tolerance <= position <= high + tolerance for position in positions)
+
+
+def _component_distance(
+    positions: Sequence[float], component: Sequence[LineSegment], orientation: GridOrientation
+) -> float:
+    low, high = _component_extent(component, orientation)
+    return sum(max(low - position, 0.0, position - high) for position in positions)
+
+
+def _component_extent(component: Sequence[LineSegment], orientation: GridOrientation) -> Tuple[float, float]:
+    values = [
+        value
+        for line in component
+        for value in ((line.x1, line.x2) if orientation == GridOrientation.HORIZONTAL else (line.y1, line.y2))
+    ]
+    return min(values), max(values)
 
 
 def _line_matches(line: LineSegment, orientation: GridOrientation, coordinate: float) -> bool:

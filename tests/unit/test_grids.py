@@ -21,8 +21,8 @@ from shoplens.classification.models import (
 from shoplens.geometry import LineSegment, PageGeometry, ShapeGeometry
 from shoplens.geometry.adapter import _deduplicate_lines
 from shoplens.geometry.transforms import to_positioned_coordinates, transform_box
-from shoplens.grids import detect_grid_system, export_grid_svg
-from shoplens.grids.detect import GRID_LABEL_RE
+from shoplens.grids import GridOrientation, detect_grid_system, export_grid_svg
+from shoplens.grids.detect import GRID_LABEL_RE, _line_extent_components
 from shoplens.title_blocks.models import SheetRecordSource
 
 
@@ -92,25 +92,38 @@ def regular_geometry_and_text():
     return geometry, items
 
 
-def separated_grids_geometry_and_text(repeated_labels=False):
+def separated_grids_geometry_and_text(
+    repeated_labels=False, shared_rows=False, shared_columns=False,
+):
     """Two complete, spatially separated grids with independent bubble groups."""
 
     lines = []
     shapes = []
     items = []
+    left_x, left_y = (120.0, 220.0, 320.0), (120.0, 220.0, 320.0)
+    right_x = left_x if shared_columns else (620.0, 720.0, 820.0)
+    right_y = left_y if shared_rows else (520.0, 620.0, 720.0)
     for prefix, x_values, y_values in (
-        ("A", (120.0, 220.0, 320.0), (120.0, 220.0, 320.0)),
-        ("B", (620.0, 720.0, 820.0), (520.0, 620.0, 720.0)),
+        ("A", left_x, left_y),
+        ("B", right_x, right_y),
     ):
         for index, x in enumerate(x_values, start=1):
             label = f"{('A' if repeated_labels else prefix)}{index}"
-            bubble_y = y_values[0] - 20.0 if prefix == "A" else y_values[-1] + 20.0
+            bubble_y = (
+                y_values[0] - 20.0
+                if prefix == "A" or (shared_rows and y_values[-1] < 400.0)
+                else y_values[-1] + 20.0
+            )
             shapes.append(ellipse(x, bubble_y))
             items.append(text(label, x - 5.0, bubble_y - 5.0))
             lines.append(LineSegment(1, x, y_values[0] - 20.0, x, y_values[-1] + 20.0))
         for index, y in enumerate(y_values, start=1):
             label = str(index if repeated_labels or prefix == "A" else index + 10)
-            bubble_x = x_values[0] if prefix == "A" else x_values[-1] + 20.0
+            bubble_x = (
+                x_values[0]
+                if prefix == "A" or (shared_columns and x_values[-1] < 500.0)
+                else x_values[-1] + 20.0
+            )
             shapes.append(ellipse(bubble_x, y))
             items.append(text(label, bubble_x - 5.0, y - 5.0))
             lines.append(LineSegment(1, x_values[0], y, x_values[-1] + 20.0, y))
@@ -286,20 +299,35 @@ class GridDetectionTests(unittest.TestCase):
         self.assertNotIn("lines", payload["page_geometry"])
         self.assertEqual(payload["page_geometry"]["line_count"], len(self.geometry.lines))
 
+    def test_grid_serialization_does_not_recursively_copy_discarded_hierarchy(self):
+        secondary_geometry, secondary_items = separated_grids_geometry_and_text()
+        secondary = detect_grid_system("secondary.pdf", secondary_geometry, secondary_items)
+        self.grid.secondary_grid_systems = [secondary]
+        with patch(
+            "shoplens.grids.models.asdict",
+            side_effect=AssertionError("deep copy"),
+            create=True,
+        ):
+            payload = self.grid.to_dict(include_hierarchy=False)
+        self.assertEqual(payload["grid_system_id"], "PAGE_1_DOMINANT_GRID")
+        self.assertEqual(payload["secondary_grid_systems"], [])
+        self.assertNotIn("lines", payload["page_geometry"])
+        self.assertIn("source_segments", payload["vertical_axes"][0])
+
     def test_no_grid_found(self):
         empty = PageGeometry(1, 100, 100, 0, (0, 0, 100, 100), (0, 0, 100, 100), "raw", "synthetic")
         result = detect_grid_system("empty.pdf", empty, [text("A", 10, 10)])
         self.assertEqual((result.horizontal_axes, result.vertical_axes), ([], []))
         self.assertIn("NO_DOMINANT_GRID_SYSTEM", result.warnings)
 
-    def test_multiple_separate_grid_systems_warn(self):
+    def test_extra_axis_family_connected_to_dominant_grid_does_not_warn_as_multi_system(self):
         geometry, items = regular_geometry_and_text()
         for label, y in (("7", 100.0), ("8", 300.0), ("9", 500.0)):
             geometry.shapes.append(ellipse(400, y))
             items.append(text(label, 395, y - 5))
             geometry.lines.append(LineSegment(1, 100, y, 900, y))
         result = detect_grid_system("drawing.pdf", geometry, items)
-        self.assertIn("MULTIPLE_SIMILAR_GRID_SYSTEMS", result.warnings)
+        self.assertNotIn("MULTIPLE_SIMILAR_GRID_SYSTEMS", result.warnings)
 
     def test_separated_complete_grids_are_exposed_as_primary_and_secondary_systems(self):
         geometry, items = separated_grids_geometry_and_text()
@@ -311,12 +339,84 @@ class GridDetectionTests(unittest.TestCase):
         self.assertEqual(secondary.grid_system_id, "PAGE_1_SECONDARY_GRID_1")
         self.assertEqual((len(secondary.horizontal_axes), len(secondary.vertical_axes)), (3, 3))
         self.assertEqual(result.warnings.count("MULTIPLE_GRID_SYSTEMS_DETECTED"), 1)
+        self.assertIn("MULTIPLE_SIMILAR_GRID_SYSTEMS", result.warnings)
 
     def test_disconnected_grids_with_repeated_axis_labels_remain_separate(self):
         geometry, items = separated_grids_geometry_and_text(repeated_labels=True)
         result = detect_grid_system("drawing.pdf", geometry, items)
         self.assertEqual((len(result.horizontal_axes), len(result.vertical_axes)), (3, 3))
         self.assertEqual(len(result.secondary_grid_systems), 1)
+
+    def test_side_by_side_grids_sharing_rows_do_not_bridge_across_gap(self):
+        geometry, items = separated_grids_geometry_and_text(shared_rows=True)
+        result = detect_grid_system("drawing.pdf", geometry, items)
+        self.assertEqual((len(result.horizontal_axes), len(result.vertical_axes)), (3, 3))
+        self.assertEqual(len(result.secondary_grid_systems), 1)
+        self.assertTrue(all(
+            axis.end_x - axis.start_x < 400.0
+            for system in result.all_grid_systems
+            for axis in system.horizontal_axes
+        ))
+
+    def test_stacked_grids_sharing_columns_do_not_bridge_across_gap(self):
+        geometry, items = separated_grids_geometry_and_text(shared_columns=True)
+        result = detect_grid_system("drawing.pdf", geometry, items)
+        self.assertEqual((len(result.horizontal_axes), len(result.vertical_axes)), (3, 3))
+        self.assertEqual(len(result.secondary_grid_systems), 1)
+        self.assertTrue(all(
+            axis.end_y - axis.start_y < 400.0
+            for system in result.all_grid_systems
+            for axis in system.vertical_axes
+        ))
+
+    def test_incidental_axis_group_does_not_claim_multiple_grid_systems(self):
+        geometry, items = regular_geometry_and_text()
+        for label, y in (("7", 680.0), ("8", 720.0), ("9", 760.0)):
+            geometry.shapes.append(ellipse(400.0, y))
+            items.append(text(label, 395.0, y - 5.0))
+        geometry.lines.append(LineSegment(1, 100.0, 680.0, 900.0, 680.0))
+        result = detect_grid_system("drawing.pdf", geometry, items)
+        self.assertNotIn("MULTIPLE_SIMILAR_GRID_SYSTEMS", result.warnings)
+        self.assertNotIn("MULTIPLE_GRID_SYSTEMS_DETECTED", result.warnings)
+
+    def test_fallback_intersections_are_recorded_on_incomplete_grid(self):
+        geometry, items = regular_geometry_and_text()
+        geometry = replace(
+            geometry,
+            lines=[
+                line for line in geometry.lines
+                if abs(line.y1 - line.y2) <= 2.0 or abs((line.x1 + line.x2) / 2.0 - 200.0) <= 2.0
+            ],
+        )
+        result = detect_grid_system("drawing.pdf", geometry, items)
+        self.assertEqual((len(result.horizontal_axes), len(result.vertical_axes)), (3, 1))
+        self.assertEqual([axis.intersection_count for axis in result.horizontal_axes], [1, 1, 1])
+        self.assertEqual(result.vertical_axes[0].intersection_count, 3)
+        self.assertIn("PERPENDICULAR_INTERSECTIONS:3", result.vertical_axes[0].evidence)
+
+    def test_duplicate_collinear_segment_extents_do_not_break_component_partitioning(self):
+        line = LineSegment(1, 10.0, 20.0, 100.0, 20.0, source="first")
+        duplicate = LineSegment(1, 10.0, 20.0, 100.0, 20.0, source="second")
+        self.assertEqual(
+            _line_extent_components([line, duplicate], GridOrientation.HORIZONTAL),
+            [[line, duplicate]],
+        )
+
+    def test_tiny_collinear_detail_segments_do_not_split_dashed_grid_extent(self):
+        grid_segments = [
+            LineSegment(1, 10.0, 20.0, 210.0, 20.0),
+            LineSegment(1, 220.0, 20.0, 420.0, 20.0),
+        ]
+        detail_segments = [
+            LineSegment(1, 500.0 + index * 2.0, 20.0, 501.0 + index * 2.0, 20.0)
+            for index in range(10)
+        ]
+        self.assertEqual(
+            _line_extent_components(
+                [*grid_segments, *detail_segments], GridOrientation.HORIZONTAL,
+            )[0],
+            grid_segments,
+        )
 
     def test_svg_export_contains_geometry_only(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -108,6 +108,8 @@ class SheetGridSectionLocalization:
     def to_dict(self) -> Dict[str, Any]:
         result = {item.name: getattr(self, item.name) for item in fields(self)}
         result["grid_system"] = self.grid_system.to_dict() if self.grid_system else None
-        result["grid_systems"] = [grid.to_dict() for grid in self.grid_systems]
+        result["grid_systems"] = [
+            grid.to_dict(include_hierarchy=False) for grid in self.grid_systems
+        ]
         result["detections"] = [item.to_dict() for item in self.detections]
         return result
