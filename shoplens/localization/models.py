@@ -67,6 +67,10 @@ class GridRelativeSectionDetection:
     ambiguous: bool
     evidence: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    outside_horizontal_bounds: bool = False
+    outside_vertical_bounds: bool = False
+    axis_extent_incomplete: bool = False
+    localization_status: str = "UNLOCALIZED"
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
@@ -89,6 +93,7 @@ class SheetGridSectionLocalization:
     detections_with_complete_bay: int
     detections_on_axes: int
     ambiguous_detection_count: int
+    unlocalized_detection_count: int
     detections: List[GridRelativeSectionDetection]
     warnings: List[str]
     record_mode: str

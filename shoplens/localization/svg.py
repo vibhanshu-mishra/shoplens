@@ -28,7 +28,13 @@ def export_localization_svg(path: Union[str, Path], result: SheetGridSectionLoca
         label.text = axis.normalized_label
     for item in result.detections:
         x, y = point(item.detection_anchor_x, item.detection_anchor_y)
-        color = "#7c3aed" if item.ambiguous else "#dc2626" if not item.inside_grid_bounds else "#f59e0b" if "ON_HORIZONTAL_AXIS" in item.warnings or "ON_VERTICAL_AXIS" in item.warnings else "#16a34a"
+        color = {
+            "COMPLETE_BAY": "#16a34a",
+            "ON_AXIS": "#f59e0b",
+            "OUTSIDE_GRID": "#dc2626",
+            "AMBIGUOUS": "#7c3aed",
+            "UNLOCALIZED": "#64748b",
+        }[item.localization_status]
         SubElement(root, "circle", {"cx": str(x), "cy": str(y), "r": "4", "fill": color, "stroke": "white", "stroke-width": "1"})
         label = SubElement(root, "text", {"x": str(x + 6), "y": str(y - 4), "font-size": "7", "fill": color})
         label.text = item.normalized_section
