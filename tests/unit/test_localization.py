@@ -112,6 +112,30 @@ class LocalizationTests(unittest.TestCase):
         result = localize_section_detections("drawing.pdf", [detection()], [grid(), second])
         self.assertIn("AMBIGUOUS_GRID_SYSTEM", result.detections[0].warnings)
 
+    def test_section_inside_secondary_grid_selects_that_system_once(self):
+        primary = grid()
+        primary.grid_system_id = "PAGE_1_DOMINANT_GRID"
+        secondary = grid()
+        secondary.grid_system_id = "PAGE_1_SECONDARY_GRID_1"
+        for axis_item in secondary.horizontal_axes:
+            axis_item.coordinate += 1000.0
+            axis_item.start_x += 1000.0
+            axis_item.end_x += 1000.0
+            axis_item.start_y += 1000.0
+            axis_item.end_y += 1000.0
+        for axis_item in secondary.vertical_axes:
+            axis_item.coordinate += 1000.0
+            axis_item.start_x += 1000.0
+            axis_item.end_x += 1000.0
+            axis_item.start_y += 1000.0
+            axis_item.end_y += 1000.0
+        primary.secondary_grid_systems = [secondary]
+        result = localize_section_detections("drawing.pdf", [detection(x=1340, y=1340)], primary)
+        item = result.detections[0]
+        self.assertEqual(item.localization_status, "COMPLETE_BAY")
+        self.assertEqual(item.grid_system_id, "PAGE_1_SECONDARY_GRID_1")
+        self.assertEqual(result.outside_grid_count, 0)
+
     def test_summary_raw_mode_counts(self):
         records = [detection(), detection(x=490, y=490)]
         result = localize_section_detections("drawing.pdf", records, grid(), record_mode="raw")
@@ -208,6 +232,7 @@ class LocalizationCliTests(unittest.TestCase):
         status, output = self.run_cli(["--sheet", "s1-20a"], ["--family", "W", "--inside-only", "--list"])
         self.assertEqual(status, 0)
         self.assertIn("Sheet: S1-20A", output)
+        self.assertIn("Grid systems: 1", output)
         self.assertIn("A–B / 1–2", output)
         self.assertIn("Unlocalized: 0", output)
         self.assertIn("Active filters:", output)

@@ -862,6 +862,8 @@ def _run_grid_system(args: argparse.Namespace) -> int:
 
     print(f"Sheet: {grid.sheet_number or '[unidentified]'}")
     print(f"PDF page: {grid.pdf_page}")
+    print(f"Grid systems: {len(grid.all_grid_systems)}")
+    print(f"Secondary grid systems: {len(grid.secondary_grid_systems)}")
     print(f"Horizontal grid axes: {len(grid.horizontal_axes)}")
     print(f"Vertical grid axes: {len(grid.vertical_axes)}")
     print(f"Unassigned grid labels: {len(grid.unassigned_labels)}")
@@ -1010,6 +1012,8 @@ def _run_grid_locate_sections(args: argparse.Namespace) -> int:
 
     print(f"Sheet: {result.sheet_number or '[unidentified]'}")
     print(f"PDF page: {result.pdf_page}")
+    print(f"Grid systems: {len(result.grid_systems)}")
+    print(f"Secondary grid systems: {result.secondary_grid_system_count}")
     print(f"Grid axes: {len(grid.horizontal_axes)} horizontal, {len(grid.vertical_axes)} vertical")
     print(f"Section detections: {result.total_section_detections}")
     print(f"Localized detections: {result.localized_detection_count}")
@@ -1017,6 +1021,8 @@ def _run_grid_locate_sections(args: argparse.Namespace) -> int:
     print(f"On axes: {result.detections_on_axes}")
     print(f"Inside grid: {result.inside_grid_count}")
     print(f"Outside grid: {result.outside_grid_count}")
+    if result.secondary_grid_system_count:
+        print(f"Outside grid before secondary association: {result.outside_grid_count_before_secondary}")
     print(f"Ambiguous: {result.ambiguous_detection_count}")
     print(f"Unlocalized: {result.unlocalized_detection_count}")
     print(f"Record mode: {result.record_mode}")

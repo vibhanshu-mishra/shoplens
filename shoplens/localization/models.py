@@ -71,6 +71,7 @@ class GridRelativeSectionDetection:
     outside_vertical_bounds: bool = False
     axis_extent_incomplete: bool = False
     localization_status: str = "UNLOCALIZED"
+    candidate_grid_system_ids: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
@@ -99,9 +100,14 @@ class SheetGridSectionLocalization:
     record_mode: str
     active_filters: Dict[str, Any] = field(default_factory=dict)
     localization_version: str = "1.0"
+    grid_systems: List[GridSystem] = field(default_factory=list)
+    primary_grid_system_id: Optional[str] = None
+    secondary_grid_system_count: int = 0
+    outside_grid_count_before_secondary: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         result = {item.name: getattr(self, item.name) for item in fields(self)}
         result["grid_system"] = self.grid_system.to_dict() if self.grid_system else None
+        result["grid_systems"] = [grid.to_dict() for grid in self.grid_systems]
         result["detections"] = [item.to_dict() for item in self.detections]
         return result

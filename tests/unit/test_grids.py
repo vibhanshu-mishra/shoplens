@@ -92,6 +92,34 @@ def regular_geometry_and_text():
     return geometry, items
 
 
+def separated_grids_geometry_and_text(repeated_labels=False):
+    """Two complete, spatially separated grids with independent bubble groups."""
+
+    lines = []
+    shapes = []
+    items = []
+    for prefix, x_values, y_values in (
+        ("A", (120.0, 220.0, 320.0), (120.0, 220.0, 320.0)),
+        ("B", (620.0, 720.0, 820.0), (520.0, 620.0, 720.0)),
+    ):
+        for index, x in enumerate(x_values, start=1):
+            label = f"{('A' if repeated_labels else prefix)}{index}"
+            bubble_y = y_values[0] - 20.0 if prefix == "A" else y_values[-1] + 20.0
+            shapes.append(ellipse(x, bubble_y))
+            items.append(text(label, x - 5.0, bubble_y - 5.0))
+            lines.append(LineSegment(1, x, y_values[0] - 20.0, x, y_values[-1] + 20.0))
+        for index, y in enumerate(y_values, start=1):
+            label = str(index if repeated_labels or prefix == "A" else index + 10)
+            bubble_x = x_values[0] if prefix == "A" else x_values[-1] + 20.0
+            shapes.append(ellipse(bubble_x, y))
+            items.append(text(label, bubble_x - 5.0, y - 5.0))
+            lines.append(LineSegment(1, x_values[0], y, x_values[-1] + 20.0, y))
+    return PageGeometry(
+        1, 1000, 800, 0, (0, 0, 1000, 800), (0, 0, 1000, 800),
+        "PDF_USER_SPACE_BOTTOM_LEFT", "synthetic", lines=lines, shapes=shapes,
+    ), items
+
+
 def classified_sheet(page=1, number="S1-20A"):
     return ClassifiedSheet(
         pdf_page=page,
@@ -273,6 +301,23 @@ class GridDetectionTests(unittest.TestCase):
         result = detect_grid_system("drawing.pdf", geometry, items)
         self.assertIn("MULTIPLE_SIMILAR_GRID_SYSTEMS", result.warnings)
 
+    def test_separated_complete_grids_are_exposed_as_primary_and_secondary_systems(self):
+        geometry, items = separated_grids_geometry_and_text()
+        result = detect_grid_system("drawing.pdf", geometry, items)
+        self.assertEqual(result.grid_system_id, "PAGE_1_DOMINANT_GRID")
+        self.assertEqual((len(result.horizontal_axes), len(result.vertical_axes)), (3, 3))
+        self.assertEqual(len(result.secondary_grid_systems), 1)
+        secondary = result.secondary_grid_systems[0]
+        self.assertEqual(secondary.grid_system_id, "PAGE_1_SECONDARY_GRID_1")
+        self.assertEqual((len(secondary.horizontal_axes), len(secondary.vertical_axes)), (3, 3))
+        self.assertEqual(result.warnings.count("MULTIPLE_GRID_SYSTEMS_DETECTED"), 1)
+
+    def test_disconnected_grids_with_repeated_axis_labels_remain_separate(self):
+        geometry, items = separated_grids_geometry_and_text(repeated_labels=True)
+        result = detect_grid_system("drawing.pdf", geometry, items)
+        self.assertEqual((len(result.horizontal_axes), len(result.vertical_axes)), (3, 3))
+        self.assertEqual(len(result.secondary_grid_systems), 1)
+
     def test_svg_export_contains_geometry_only(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "grid.svg"
@@ -281,6 +326,15 @@ class GridDetectionTests(unittest.TestCase):
         self.assertIn("<svg", value)
         self.assertIn("<line", value)
         self.assertNotIn("data:image", value)
+
+    def test_svg_marks_secondary_grid_axes_with_their_system_id(self):
+        geometry, items = separated_grids_geometry_and_text()
+        result = detect_grid_system("drawing.pdf", geometry, items)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grids.svg"
+            export_grid_svg(path, result)
+            value = path.read_text(encoding="utf-8")
+        self.assertIn('data-grid-system="PAGE_1_SECONDARY_GRID_1"', value)
 
 
 class GridCliTests(unittest.TestCase):
@@ -300,6 +354,7 @@ class GridCliTests(unittest.TestCase):
         status, output, _ = self.run_cli(["--sheet", "s1-20a", "--list"])
         self.assertEqual(status, 0)
         self.assertIn("Sheet: S1-20A", output)
+        self.assertIn("Grid systems: 1", output)
         self.assertIn("VERTICAL | A", output)
 
     def test_page_lookup_and_json(self):
