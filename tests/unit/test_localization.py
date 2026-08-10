@@ -65,6 +65,7 @@ class LocalizationTests(unittest.TestCase):
         payload = json.loads(json.dumps(item.to_dict()))
         self.assertEqual(payload["section_family"], "W")
         self.assertEqual(payload["detection_x"], 340.0)
+        self.assertEqual(payload["localization_status"], "COMPLETE_BAY")
 
     def test_on_horizontal_vertical_and_near_intersection(self):
         horizontal = self.locate(detection(x=340, y=490))
@@ -118,6 +119,49 @@ class LocalizationTests(unittest.TestCase):
         self.assertEqual(result.record_mode, "raw")
         self.assertEqual(result.detections_on_axes, 1)
 
+    def test_primary_statuses_partition_each_detection_once(self):
+        ambiguous_grid = grid(vertical=("A", "04", "C"))
+        records = [
+            detection(),
+            detection(x=340, y=490),
+            detection(x=920, y=340),
+            detection(x=920, y=920),
+            detection(x=490, y=340),
+        ]
+        result = localize_section_detections("drawing.pdf", records, ambiguous_grid)
+        self.assertEqual(
+            [item.localization_status for item in result.detections],
+            ["COMPLETE_BAY", "ON_AXIS", "OUTSIDE_GRID", "OUTSIDE_GRID", "AMBIGUOUS"],
+        )
+        self.assertEqual(result.detections_with_complete_bay, 1)
+        self.assertEqual(result.detections_on_axes, 1)
+        self.assertEqual(result.outside_grid_count, 2)
+        self.assertEqual(result.ambiguous_detection_count, 1)
+        self.assertEqual(result.unlocalized_detection_count, 0)
+        self.assertEqual(
+            result.total_section_detections,
+            result.detections_with_complete_bay
+            + result.detections_on_axes
+            + result.outside_grid_count
+            + result.ambiguous_detection_count
+            + result.unlocalized_detection_count,
+        )
+
+    def test_missing_axis_family_is_unlocalized_not_outside(self):
+        system = grid()
+        system.vertical_axes = []
+        result = localize_section_detections("drawing.pdf", [detection()], system)
+        item = result.detections[0]
+        self.assertEqual(item.localization_status, "UNLOCALIZED")
+        self.assertIn("MISSING_VERTICAL_GRID_AXIS_FAMILY", item.warnings)
+        self.assertNotIn("OUTSIDE_GRID_BOUNDS", item.warnings)
+        self.assertEqual(result.unlocalized_detection_count, 1)
+
+    def test_no_section_labels_has_zero_primary_counts(self):
+        result = localize_section_detections("drawing.pdf", [], grid())
+        self.assertEqual(result.total_section_detections, 0)
+        self.assertEqual(result.unlocalized_detection_count, 0)
+
     def test_all_filters_and_combination(self):
         records = [
             self.locate(),
@@ -165,6 +209,7 @@ class LocalizationCliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("Sheet: S1-20A", output)
         self.assertIn("A–B / 1–2", output)
+        self.assertIn("Unlocalized: 0", output)
         self.assertIn("Active filters:", output)
 
     def test_page_lookup_json(self):

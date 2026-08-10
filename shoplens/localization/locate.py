@@ -31,6 +31,9 @@ class _LocalizationContext:
     on_h: bool
     on_v: bool
     ambiguous_system: bool
+    outside_horizontal_bounds: bool
+    outside_vertical_bounds: bool
+    axis_extent_incomplete: bool
 
     @property
     def complete_bay(self) -> bool:
@@ -71,12 +74,13 @@ def localize_section_detections(
         sheet_title=(selected_grid.sheet_title if selected_grid else (records[0].sheet_title if records else None)),
         grid_system=selected_grid,
         total_section_detections=len(records),
-        localized_detection_count=sum(item.nearest_horizontal_axis is not None or item.nearest_vertical_axis is not None for item in localized),
+        localized_detection_count=sum(item.localization_status != "UNLOCALIZED" for item in localized),
         inside_grid_count=sum(item.inside_grid_bounds for item in localized),
-        outside_grid_count=sum(not item.inside_grid_bounds for item in localized),
-        detections_with_complete_bay=sum(item.inside_valid_bay for item in localized),
-        detections_on_axes=sum("ON_HORIZONTAL_AXIS" in item.warnings or "ON_VERTICAL_AXIS" in item.warnings for item in localized),
-        ambiguous_detection_count=sum(item.ambiguous for item in localized),
+        outside_grid_count=sum(item.localization_status == "OUTSIDE_GRID" for item in localized),
+        detections_with_complete_bay=sum(item.localization_status == "COMPLETE_BAY" for item in localized),
+        detections_on_axes=sum(item.localization_status == "ON_AXIS" for item in localized),
+        ambiguous_detection_count=sum(item.localization_status == "AMBIGUOUS" for item in localized),
+        unlocalized_detection_count=sum(item.localization_status == "UNLOCALIZED" for item in localized),
         detections=localized,
         warnings=warnings,
         record_mode=record_mode,
@@ -149,9 +153,10 @@ def _localize(
     if score < 0.60:
         warnings.append("LOW_LOCALIZATION_CONFIDENCE")
     ambiguous = context.ambiguous_system or label_ambiguity or score < 0.60
+    status = _primary_status(context, ambiguous)
     if context.complete_bay:
         evidence.extend(["SURROUNDING_HORIZONTAL_AXES", "SURROUNDING_VERTICAL_AXES", "COMPLETE_GRID_BAY"])
-    return _localized_detection(detection, context, score, ambiguous, evidence, warnings)
+    return _localized_detection(detection, context, score, ambiguous, status, evidence, warnings)
 
 
 def _localized_detection(
@@ -159,6 +164,7 @@ def _localized_detection(
     context: _LocalizationContext,
     score: float,
     ambiguous: bool,
+    status: str,
     evidence: List[str],
     warnings: List[str],
 ) -> GridRelativeSectionDetection:
@@ -183,6 +189,10 @@ def _localized_detection(
         grid_confidence=context.grid.confidence, localization_confidence=score,
         coordinate_system=context.grid.page_geometry.coordinate_system,
         ambiguous=ambiguous, evidence=evidence, warnings=list(dict.fromkeys(warnings)),
+        outside_horizontal_bounds=context.outside_horizontal_bounds,
+        outside_vertical_bounds=context.outside_vertical_bounds,
+        axis_extent_incomplete=context.axis_extent_incomplete,
+        localization_status=status,
     )
 
 
@@ -202,12 +212,14 @@ def _localization_context(
     on_v = nearest_v is not None and abs(anchor_x - nearest_v.coordinate) <= ON_AXIS_TOLERANCE
     lower_h, upper_h = _surrounding(horizontal, anchor_y, on_h)
     left_v, right_v = _surrounding(vertical, anchor_x, on_v)
+    inside, outside_horizontal, outside_vertical, extent_incomplete = _grid_bounds(grid, anchor_x, anchor_y)
     return _LocalizationContext(
         grid, anchor_x, anchor_y, nearest_h, nearest_v, lower_h, upper_h, left_v,
         right_v, _interval(lower_h, upper_h, nearest_h if on_h else None),
         _interval(left_v, right_v, nearest_v if on_v else None),
-        _inside_grid_extents(grid, anchor_x, anchor_y), on_h, on_v,
+        inside, on_h, on_v,
         len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.12,
+        outside_horizontal, outside_vertical, extent_incomplete,
     )
 
 
@@ -218,10 +230,16 @@ def _explain_localization(
 ) -> Tuple[List[str], List[str]]:
     warnings: List[str] = []
     evidence = ["ANCHOR_BOUNDING_BOX_CENTER", f"GRID_CONFIDENCE:{context.grid.confidence:.3f}"]
+    if not context.grid.horizontal_axes:
+        warnings.append("MISSING_HORIZONTAL_GRID_AXIS_FAMILY")
+    if not context.grid.vertical_axes:
+        warnings.append("MISSING_VERTICAL_GRID_AXIS_FAMILY")
     if context.inside:
         evidence.append("INSIDE_DOMINANT_GRID_EXTENTS")
-    else:
+    elif context.grid.horizontal_axes and context.grid.vertical_axes:
         warnings.append("OUTSIDE_GRID_BOUNDS")
+    if context.axis_extent_incomplete:
+        warnings.append("AXIS_EXTENT_INCOMPLETE")
     if not context.on_h and (context.lower_h is None or context.upper_h is None):
         warnings.append("NO_SURROUNDING_HORIZONTAL_AXES")
     if not context.on_v and (context.left_v is None or context.right_v is None):
@@ -292,14 +310,45 @@ def _interval(lower: Optional[GridAxis], upper: Optional[GridAxis], on: Optional
 
 
 def _inside_grid_extents(grid: GridSystem, x: float, y: float) -> bool:
+    return _grid_bounds(grid, x, y)[0]
+
+
+def _grid_bounds(grid: GridSystem, x: float, y: float) -> Tuple[bool, bool, bool, bool]:
+    """Return inside, horizontal-outside, vertical-outside, and extent-gap flags."""
+
     if not grid.horizontal_axes or not grid.vertical_axes:
-        return False
+        return False, False, False, False
     x_low, x_high = min(axis.coordinate for axis in grid.vertical_axes), max(axis.coordinate for axis in grid.vertical_axes)
     y_low, y_high = min(axis.coordinate for axis in grid.horizontal_axes), max(axis.coordinate for axis in grid.horizontal_axes)
-    within_region = x_low <= x <= x_high and y_low <= y <= y_high
-    horizontal_extent = any(axis.start_x <= x <= axis.end_x for axis in grid.horizontal_axes)
-    vertical_extent = any(axis.start_y <= y <= axis.end_y for axis in grid.vertical_axes)
-    return within_region and horizontal_extent and vertical_extent
+    outside_horizontal = not (y_low <= y <= y_high) or not any(
+        min(axis.start_x, axis.end_x) <= x <= max(axis.start_x, axis.end_x)
+        for axis in grid.horizontal_axes
+    )
+    outside_vertical = not (x_low <= x <= x_high) or not any(
+        min(axis.start_y, axis.end_y) <= y <= max(axis.start_y, axis.end_y)
+        for axis in grid.vertical_axes
+    )
+    within_coordinate_bounds = x_low <= x <= x_high and y_low <= y <= y_high
+    return (
+        not outside_horizontal and not outside_vertical,
+        outside_horizontal,
+        outside_vertical,
+        within_coordinate_bounds and (outside_horizontal or outside_vertical),
+    )
+
+
+def _primary_status(context: _LocalizationContext, ambiguous: bool) -> str:
+    if not context.grid.horizontal_axes or not context.grid.vertical_axes:
+        return "UNLOCALIZED"
+    if not context.inside:
+        return "OUTSIDE_GRID"
+    if ambiguous:
+        return "AMBIGUOUS"
+    if context.on_h or context.on_v:
+        return "ON_AXIS"
+    if context.complete_bay:
+        return "COMPLETE_BAY"
+    return "UNLOCALIZED"
 
 
 def _system_score(grid: GridSystem, x: float, y: float) -> float:

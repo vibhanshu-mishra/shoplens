@@ -1018,6 +1018,7 @@ def _run_grid_locate_sections(args: argparse.Namespace) -> int:
     print(f"Inside grid: {result.inside_grid_count}")
     print(f"Outside grid: {result.outside_grid_count}")
     print(f"Ambiguous: {result.ambiguous_detection_count}")
+    print(f"Unlocalized: {result.unlocalized_detection_count}")
     print(f"Record mode: {result.record_mode}")
     if detection_filters:
         print(f"Matching detections: {len(displayed)}")
@@ -1031,7 +1032,8 @@ def _run_grid_locate_sections(args: argparse.Namespace) -> int:
             print(
                 f"{item.normalized_section} | x={item.detection_anchor_x:.2f} | "
                 f"y={item.detection_anchor_y:.2f} | bay={item.bay_id or _location_label(item)} | "
-                f"nearest={nearest} | confidence={item.localization_confidence:.3f}"
+                f"nearest={nearest} | status={item.localization_status} | "
+                f"confidence={item.localization_confidence:.3f}"
             )
     if args.debug:
         print("\nLocalization diagnostics:")
@@ -1041,6 +1043,10 @@ def _run_grid_locate_sections(args: argparse.Namespace) -> int:
         for item in displayed:
             print(
                 f"{item.normalized_section} @ ({item.detection_anchor_x:.2f},{item.detection_anchor_y:.2f}) | "
+                f"status={item.localization_status} | "
+                f"signed_distances=(vertical:{item.nearest_vertical_distance}, horizontal:{item.nearest_horizontal_distance}) | "
+                f"outside=(horizontal:{item.outside_horizontal_bounds}, vertical:{item.outside_vertical_bounds}) | "
+                f"axis_extent_incomplete={item.axis_extent_incomplete} | "
                 f"evidence={','.join(item.evidence) or '-'} | warnings={','.join(item.warnings) or '-'}"
             )
         for warning in result.warnings:
