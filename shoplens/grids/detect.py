@@ -56,30 +56,19 @@ def detect_grid_system(
         if horizontal or vertical:
             _set_intersections(horizontal, vertical)
             candidates = [(horizontal, vertical, _intersection_total(horizontal, vertical))]
-    selected_axes = [axis for axes, _, _ in candidates for axis in axes] + [
-        axis for _, axes, _ in candidates for axis in axes
-    ]
-    initially_assigned_ids = {
-        id(label)
-        for axis in selected_axes
-        for label in axis.label_candidates
-    }
+    selected_axes = [axis for axes, _, _ in candidates for axis in axes] + [axis for _, axes, _ in candidates for axis in axes]
+    initially_assigned_ids = {id(label) for axis in selected_axes for label in axis.label_candidates}
     remaining_labels = [label for label in labels if id(label) not in initially_assigned_ids]
-    recovered_horizontal = _recover_perpendicular_supported_axes(
-        GridOrientation.HORIZONTAL, remaining_labels, geometry.lines, geometry, vertical,
+    candidates = _recover_candidate_systems_to_fixed_point(
+        candidates, remaining_labels, geometry.lines, geometry,
     )
-    recovered_vertical = _recover_perpendicular_supported_axes(
-        GridOrientation.VERTICAL,
-        remaining_labels,
-        geometry.lines,
-        geometry,
-        [*horizontal, *recovered_horizontal],
-    )
-    if recovered_horizontal or recovered_vertical:
-        horizontal.extend(recovered_horizontal)
-        vertical.extend(recovered_vertical)
-        _set_recovery_intersections(recovered_horizontal, recovered_vertical, horizontal, vertical)
-        selected_axes.extend([*recovered_horizontal, *recovered_vertical])
+    candidates = _rank_system_candidates(candidates)
+    coherent_system_count = len(candidates)
+    if candidates:
+        horizontal, vertical = candidates[0][0], candidates[0][1]
+    else:
+        horizontal, vertical = [], []
+    selected_axes = [axis for axes, _, _ in candidates for axis in axes] + [axis for _, axes, _ in candidates for axis in axes]
     _attach_matching_labels(selected_axes, labels)
     assigned_ids = {
         id(label)
@@ -424,14 +413,22 @@ def _coherent_system_candidates(
             continue
         _set_intersections(component_horizontal, component_vertical)
         candidates.append((component_horizontal, component_vertical, intersections))
+    return _rank_system_candidates(candidates)
+
+
+def _rank_system_candidates(
+    candidates: Sequence[Tuple[List[GridAxis], List[GridAxis], int]],
+) -> List[Tuple[List[GridAxis], List[GridAxis], int]]:
+    """Rank coherent systems from their final, fully supported axis sets."""
+
     return sorted(
         candidates,
         key=lambda value: (
             -(len(value[0]) + len(value[1])),
             -value[2],
             -_system_confidence(value[0], value[1]),
-            min(axis.coordinate for axis in value[1]),
-            min(axis.coordinate for axis in value[0]),
+            min((axis.coordinate for axis in value[1]), default=float("inf")),
+            min((axis.coordinate for axis in value[0]), default=float("inf")),
         ),
     )
 
@@ -834,32 +831,97 @@ def _recover_perpendicular_supported_axes(
             if intersections < 2:
                 continue
             axis.intersection_count = intersections
-            axis.confidence = min(0.98, axis.confidence + 0.04)
-            axis.evidence.append(f"PERPENDICULAR_INTERSECTIONS:{intersections}")
             recovered.append(axis)
     return sorted(recovered, key=lambda axis: axis.coordinate)
 
 
-def _set_recovery_intersections(
-    recovered_horizontal: Sequence[GridAxis],
-    recovered_vertical: Sequence[GridAxis],
+def _recover_candidate_axes_to_fixed_point(
     horizontal: Sequence[GridAxis],
     vertical: Sequence[GridAxis],
-) -> None:
-    """Update existing intersection counters for axes added after graph selection."""
+    labels: Sequence[GridLabel],
+    lines: Sequence[LineSegment],
+    geometry: PageGeometry,
+) -> Tuple[List[GridAxis], List[GridAxis]]:
+    """Recover one coherent system until no additional labelled axis is valid."""
 
-    for axis in horizontal:
-        if axis in recovered_horizontal:
-            continue
-        axis.intersection_count += sum(
-            _axes_intersect(axis, recovered) for recovered in recovered_vertical
-        )
-    for axis in vertical:
-        if axis in recovered_vertical:
-            continue
-        axis.intersection_count += sum(
-            _axes_intersect(recovered, axis) for recovered in recovered_horizontal
-        )
+    final = _recover_candidate_systems_to_fixed_point(
+        [(list(horizontal), list(vertical), _intersection_total(horizontal, vertical))],
+        labels,
+        lines,
+        geometry,
+    )
+    final_horizontal, final_vertical, _ = final[0]
+    original_horizontal = {id(axis) for axis in horizontal}
+    original_vertical = {id(axis) for axis in vertical}
+    return (
+        [axis for axis in final_horizontal if id(axis) not in original_horizontal],
+        [axis for axis in final_vertical if id(axis) not in original_vertical],
+    )
+
+
+def _recover_candidate_systems_to_fixed_point(
+    candidates: Sequence[Tuple[List[GridAxis], List[GridAxis], int]],
+    labels: Sequence[GridLabel],
+    lines: Sequence[LineSegment],
+    geometry: PageGeometry,
+) -> List[Tuple[List[GridAxis], List[GridAxis], int]]:
+    """Recover each coherent system locally, without cross-system label claims.
+
+    Each accepted axis consumes at least one finite physical label observation.
+    That bounds the monotonic loop by the number of remaining labels rather
+    than an arbitrary iteration limit. A label proposed by more than one
+    system (or for both orientations) remains unassigned and diagnostic.
+    """
+
+    systems = [(list(horizontal), list(vertical)) for horizontal, vertical, _ in candidates]
+    available = list(labels)
+    for _ in range(len(available)):
+        proposals = []
+        for system_index, (horizontal, vertical) in enumerate(systems):
+            proposals.extend(
+                (system_index, GridOrientation.HORIZONTAL, axis)
+                for axis in _recover_perpendicular_supported_axes(
+                    GridOrientation.HORIZONTAL, available, lines, geometry, vertical,
+                )
+            )
+            proposals.extend(
+                (system_index, GridOrientation.VERTICAL, axis)
+                for axis in _recover_perpendicular_supported_axes(
+                    GridOrientation.VERTICAL, available, lines, geometry, horizontal,
+                )
+            )
+        if not proposals:
+            break
+
+        claimants: Dict[int, set[Tuple[int, GridOrientation]]] = defaultdict(set)
+        for system_index, orientation, axis in proposals:
+            for label in axis.label_candidates:
+                claimants[id(label)].add((system_index, orientation))
+        accepted = [
+            (system_index, orientation, axis)
+            for system_index, orientation, axis in proposals
+            if axis.label_candidates
+            and all(len(claimants[id(label)]) == 1 for label in axis.label_candidates)
+        ]
+        if not accepted:
+            break
+
+        consumed = set()
+        for system_index, orientation, axis in accepted:
+            label_ids = {id(label) for label in axis.label_candidates}
+            if label_ids & consumed:
+                continue
+            systems[system_index][0 if orientation == GridOrientation.HORIZONTAL else 1].append(axis)
+            consumed.update(label_ids)
+        if not consumed:
+            break
+        available = [label for label in available if id(label) not in consumed]
+
+    recovered = []
+    for horizontal, vertical in systems:
+        _set_intersections(horizontal, vertical)
+        recovered.append((horizontal, vertical, _intersection_total(horizontal, vertical)))
+    return recovered
 
 
 def _interval_components(
@@ -1005,10 +1067,19 @@ def _covered_length(
 
 
 def _set_intersections(horizontal: Sequence[GridAxis], vertical: Sequence[GridAxis]) -> None:
+    """Derive symmetric intersection metadata from a candidate's final axes."""
+
+    for axis in [*horizontal, *vertical]:
+        axis.confidence = _axis_base_confidence(axis)
+        axis.intersection_count = 0
+        axis.evidence[:] = [
+            evidence
+            for evidence in axis.evidence
+            if not evidence.startswith("PERPENDICULAR_INTERSECTIONS:")
+        ]
     for axis in horizontal:
         axis.intersection_count = sum(
-            axis.start_x <= other.coordinate <= axis.end_x
-            and other.start_y <= axis.coordinate <= other.end_y
+            _axes_intersect(axis, other)
             for other in vertical
         )
         if axis.intersection_count:
@@ -1016,13 +1087,29 @@ def _set_intersections(horizontal: Sequence[GridAxis], vertical: Sequence[GridAx
             axis.confidence = min(0.98, axis.confidence + 0.04)
     for axis in vertical:
         axis.intersection_count = sum(
-            other.start_x <= axis.coordinate <= other.end_x
-            and axis.start_y <= other.coordinate <= axis.end_y
+            _axes_intersect(other, axis)
             for other in horizontal
         )
         if axis.intersection_count:
             axis.evidence.append(f"PERPENDICULAR_INTERSECTIONS:{axis.intersection_count}")
             axis.confidence = min(0.98, axis.confidence + 0.04)
+
+
+def _axis_base_confidence(axis: GridAxis) -> float:
+    """Rebuild confidence so graph recomputation never accumulates boosts."""
+
+    coverage = next(
+        (
+            float(evidence.split(":", 1)[1])
+            for evidence in axis.evidence
+            if evidence.startswith("SEGMENT_COVERAGE:")
+        ),
+        None,
+    )
+    if coverage is None:
+        return max(0.0, axis.confidence - (0.04 if axis.intersection_count else 0.0))
+    repeated = "LABEL_REPEATED_AT_OPPOSITE_ENDS" in axis.evidence
+    return min(0.94, 0.68 + min(0.16, coverage * 0.12) + (0.08 if repeated else 0.0))
 
 
 def _system_confidence(horizontal: Sequence[GridAxis], vertical: Sequence[GridAxis]) -> float:

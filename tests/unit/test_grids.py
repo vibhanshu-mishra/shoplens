@@ -24,7 +24,11 @@ from shoplens.geometry.transforms import to_positioned_coordinates, transform_bo
 from shoplens.grids import GridOrientation, detect_grid_system, export_grid_svg
 from shoplens.grids.detect import GRID_LABEL_RE, _line_extent_components
 from shoplens.grids.detect import _matching_line_component
+from shoplens.grids.detect import _recover_candidate_axes_to_fixed_point
+from shoplens.grids.detect import _recover_candidate_systems_to_fixed_point
 from shoplens.grids.detect import _recover_perpendicular_supported_axes
+from shoplens.grids.detect import _rank_system_candidates
+from shoplens.grids.detect import _set_intersections
 from shoplens.grids.models import GridAxis, GridLabel
 from shoplens.title_blocks.models import SheetRecordSource
 
@@ -160,6 +164,84 @@ def classified_sheet(page=1, number="S1-20A"):
         group_keys=[],
         warnings=[],
     )
+
+
+def recovery_axis(axis_id, orientation, label, coordinate, start, end):
+    if orientation == GridOrientation.HORIZONTAL:
+        start_x, start_y, end_x, end_y = start, coordinate, end, coordinate
+    else:
+        start_x, start_y, end_x, end_y = coordinate, start, coordinate, end
+    return GridAxis(
+        axis_id, orientation, label, [], coordinate,
+        start_x, start_y, end_x, end_y,
+        [], [], 0, 0.8, ["SEGMENT_COVERAGE:0.100"],
+    )
+
+
+def fragmented_recovery_geometry_and_labels():
+    """One candidate whose two missing axes need fixed-point recovery."""
+
+    horizontal = [
+        recovery_axis("H:1", GridOrientation.HORIZONTAL, "1", 80.0, 40.0, 332.0),
+        recovery_axis("H:3", GridOrientation.HORIZONTAL, "3", 240.0, 40.0, 332.0),
+    ]
+    vertical = [
+        recovery_axis("V:1", GridOrientation.VERTICAL, "A", 80.0, 40.0, 332.0),
+    ]
+    lines = [
+        *[
+            LineSegment(1, start, 100.0, start + 12.0, 100.0)
+            for start in (40.0, 120.0, 200.0, 280.0, 320.0)
+        ],
+        *[
+            LineSegment(1, 300.0, start, 300.0, start + 12.0)
+            for start in (40.0, 120.0, 200.0, 280.0, 320.0)
+        ],
+    ]
+    labels = [
+        GridLabel("2", "2", 1, 20.0, 95.0, 10.0, 10.0, "ELLIPSE", 0.8),
+        GridLabel("B", "B", 1, 295.0, 20.0, 10.0, 10.0, "ELLIPSE", 0.8),
+    ]
+    geometry = PageGeometry(
+        1, 400, 400, 0, (0, 0, 400, 400), (0, 0, 400, 400),
+        "raw", "synthetic", lines=lines,
+    )
+    return horizontal, vertical, labels, lines, geometry
+
+
+def primary_and_recoverable_secondary_geometry_and_text():
+    """A complete dominant grid plus a disconnected recoverable secondary."""
+
+    lines = []
+    shapes = []
+    items = []
+    for index, x in enumerate((100.0, 200.0, 300.0), start=1):
+        shapes.append(ellipse(x, 80.0))
+        items.append(text(f"P{index}", x - 5.0, 75.0))
+        lines.append(LineSegment(1, x, 80.0, x, 320.0))
+    for index, y in enumerate((100.0, 200.0, 300.0), start=1):
+        shapes.append(ellipse(80.0, y))
+        items.append(text(str(index), 75.0, y - 5.0))
+        lines.append(LineSegment(1, 80.0, y, 320.0, y))
+
+    for index, x in enumerate((600.0, 700.0), start=1):
+        shapes.append(ellipse(x, 740.0))
+        items.append(text(f"S{index}", x - 5.0, 735.0))
+        lines.append(LineSegment(1, x, 480.0, x, 720.0))
+    shapes.append(ellipse(800.0, 740.0))
+    items.append(text("S3", 795.0, 735.0))
+    lines.extend(
+        LineSegment(1, 800.0, start, 800.0, start + 12.0)
+        for start in (480.0, 560.0, 640.0, 720.0)
+    )
+    for index, y in enumerate((500.0, 600.0, 700.0), start=11):
+        shapes.append(ellipse(840.0, y))
+        items.append(text(str(index), 835.0, y - 5.0))
+        lines.append(LineSegment(1, 580.0, y, 820.0, y))
+    return PageGeometry(
+        1, 1000, 800, 0, (0, 0, 1000, 800), (0, 0, 1000, 800),
+        "raw", "synthetic", lines=lines, shapes=shapes,
+    ), items
 
 
 class GeometryTransformTests(unittest.TestCase):
@@ -651,6 +733,143 @@ class GridDetectionTests(unittest.TestCase):
 
         self.assertEqual([axis.normalized_label for axis in recovered], ["EB2"])
         self.assertEqual(recovered[0].intersection_count, 5)
+
+    def test_secondary_system_recovers_its_own_fragmented_axis(self):
+        geometry, items = primary_and_recoverable_secondary_geometry_and_text()
+
+        result = detect_grid_system("drawing.pdf", geometry, items)
+
+        self.assertEqual((len(result.horizontal_axes), len(result.vertical_axes)), (3, 3))
+        self.assertEqual(len(result.secondary_grid_systems), 1)
+        self.assertEqual(
+            [axis.normalized_label for axis in result.secondary_grid_systems[0].vertical_axes],
+            ["S1", "S2", "S3"],
+        )
+        self.assertNotIn("S3", [label.normalized_label for label in result.unassigned_labels])
+
+    def test_fixed_point_recovery_retries_horizontal_after_vertical_recovery(self):
+        horizontal, vertical, labels, lines, geometry = fragmented_recovery_geometry_and_labels()
+
+        recovered_horizontal, recovered_vertical = _recover_candidate_axes_to_fixed_point(
+            horizontal, vertical, labels, lines, geometry,
+        )
+
+        self.assertEqual([axis.normalized_label for axis in recovered_horizontal], ["2"])
+        self.assertEqual([axis.normalized_label for axis in recovered_vertical], ["B"])
+        self.assertEqual(recovered_horizontal[0].intersection_count, 2)
+        self.assertEqual(recovered_vertical[0].intersection_count, 3)
+
+    def test_fixed_point_recovery_retries_vertical_after_horizontal_recovery(self):
+        horizontal = [
+            recovery_axis("H:1", GridOrientation.HORIZONTAL, "1", 80.0, 40.0, 332.0),
+        ]
+        vertical = [
+            recovery_axis("V:A", GridOrientation.VERTICAL, "A", 80.0, 40.0, 332.0),
+            recovery_axis("V:C", GridOrientation.VERTICAL, "C", 240.0, 40.0, 332.0),
+        ]
+        lines = [
+            *[
+                LineSegment(1, start, 300.0, start + 12.0, 300.0)
+                for start in (40.0, 120.0, 200.0, 280.0, 320.0)
+            ],
+            *[
+                LineSegment(1, 100.0, start, 100.0, start + 12.0)
+                for start in (40.0, 120.0, 200.0, 280.0, 320.0)
+            ],
+        ]
+        labels = [
+            GridLabel("2", "2", 1, 20.0, 295.0, 10.0, 10.0, "ELLIPSE", 0.8),
+            GridLabel("B", "B", 1, 95.0, 20.0, 10.0, 10.0, "ELLIPSE", 0.8),
+        ]
+        geometry = PageGeometry(
+            1, 400, 400, 0, (0, 0, 400, 400), (0, 0, 400, 400),
+            "raw", "synthetic", lines=lines,
+        )
+
+        recovered_horizontal, recovered_vertical = _recover_candidate_axes_to_fixed_point(
+            horizontal, vertical, labels, lines, geometry,
+        )
+
+        self.assertEqual([axis.normalized_label for axis in recovered_horizontal], ["2"])
+        self.assertEqual([axis.normalized_label for axis in recovered_vertical], ["B"])
+        self.assertEqual(recovered_horizontal[0].intersection_count, 3)
+        self.assertEqual(recovered_vertical[0].intersection_count, 2)
+
+    def test_ambiguous_recovery_label_is_not_claimed_by_two_systems(self):
+        first_vertical = [
+            recovery_axis("V:A", GridOrientation.VERTICAL, "A", 80.0, 40.0, 160.0),
+            recovery_axis("V:B", GridOrientation.VERTICAL, "B", 200.0, 40.0, 160.0),
+        ]
+        second_vertical = [
+            recovery_axis("V:C", GridOrientation.VERTICAL, "C", 600.0, 40.0, 160.0),
+            recovery_axis("V:D", GridOrientation.VERTICAL, "D", 720.0, 40.0, 160.0),
+        ]
+        lines = [
+            LineSegment(1, start, 100.0, start + 12.0, 100.0)
+            for start in (40.0, 180.0, 320.0, 460.0, 600.0, 740.0)
+        ]
+        label = GridLabel("1", "1", 1, 20.0, 95.0, 10.0, 10.0, "ELLIPSE", 0.8)
+        geometry = PageGeometry(
+            1, 800, 400, 0, (0, 0, 800, 400), (0, 0, 800, 400),
+            "raw", "synthetic", lines=lines,
+        )
+
+        recovered = _recover_candidate_systems_to_fixed_point(
+            [([], first_vertical, 0), ([], second_vertical, 0)],
+            [label], lines, geometry,
+        )
+
+        self.assertEqual([len(horizontal) for horizontal, _, _ in recovered], [0, 0])
+
+    def test_ranking_uses_axis_counts_after_recovery(self):
+        first = (
+            [recovery_axis("H:1", GridOrientation.HORIZONTAL, "1", 100.0, 40.0, 360.0)],
+            [
+                recovery_axis("V:A", GridOrientation.VERTICAL, "A", 100.0, 40.0, 360.0),
+                recovery_axis("V:B", GridOrientation.VERTICAL, "B", 200.0, 40.0, 360.0),
+            ],
+            2,
+        )
+        recovered_secondary = (
+            [
+                recovery_axis("H:2", GridOrientation.HORIZONTAL, "2", 100.0, 440.0, 760.0),
+                recovery_axis("H:3", GridOrientation.HORIZONTAL, "3", 200.0, 440.0, 760.0),
+            ],
+            [
+                recovery_axis("V:C", GridOrientation.VERTICAL, "C", 500.0, 40.0, 360.0),
+                recovery_axis("V:D", GridOrientation.VERTICAL, "D", 600.0, 40.0, 360.0),
+                recovery_axis("V:E", GridOrientation.VERTICAL, "E", 700.0, 40.0, 360.0),
+            ],
+            6,
+        )
+
+        ranked = _rank_system_candidates([first, recovered_secondary])
+
+        self.assertIs(ranked[0], recovered_secondary)
+
+    def test_final_intersections_are_symmetric_and_idempotent(self):
+        horizontal = [
+            recovery_axis("H:1", GridOrientation.HORIZONTAL, "1", 100.0, 40.0, 360.0),
+            recovery_axis("H:2", GridOrientation.HORIZONTAL, "2", 200.0, 40.0, 360.0),
+        ]
+        vertical = [
+            recovery_axis("V:A", GridOrientation.VERTICAL, "A", 100.0, 40.0, 360.0),
+            recovery_axis("V:B", GridOrientation.VERTICAL, "B", 300.0, 40.0, 360.0),
+        ]
+        horizontal[0].evidence.append("PERPENDICULAR_INTERSECTIONS:99")
+
+        _set_intersections(horizontal, vertical)
+        first = [(axis.intersection_count, axis.confidence, list(axis.evidence)) for axis in [*horizontal, *vertical]]
+        _set_intersections(horizontal, vertical)
+        second = [(axis.intersection_count, axis.confidence, list(axis.evidence)) for axis in [*horizontal, *vertical]]
+
+        self.assertEqual([axis.intersection_count for axis in horizontal], [2, 2])
+        self.assertEqual([axis.intersection_count for axis in vertical], [2, 2])
+        self.assertEqual(first, second)
+        self.assertTrue(all(
+            sum(item.startswith("PERPENDICULAR_INTERSECTIONS:") for item in axis.evidence) == 1
+            for axis in [*horizontal, *vertical]
+        ))
 
     def test_isolated_minor_component_remains_selectable_geometry(self):
         left = [LineSegment(1, 0.0, 20.0, 200.0, 20.0)]
