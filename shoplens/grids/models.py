@@ -1,6 +1,6 @@
 """Typed, explainable structural grid-system results."""
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -85,21 +85,140 @@ class GridSystem:
     warnings: List[str]
     bubble_diagnostics: Dict[str, int] = field(default_factory=dict)
     grid_version: str = "1.0"
+    grid_system_id: str = ""
+    system_evidence: List[str] = field(default_factory=list)
+    secondary_grid_systems: List["GridSystem"] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
-        result = asdict(self)
-        result["sheet_subject"] = self.sheet_subject.value if self.sheet_subject else None
+    @property
+    def all_grid_systems(self) -> List["GridSystem"]:
+        """Return this primary system followed by independently supported systems."""
+
+        return [self, *self.secondary_grid_systems]
+
+    @property
+    def system_bounds(self) -> Optional[Dict[str, float]]:
+        if not self.horizontal_axes or not self.vertical_axes:
+            return None
+        return {
+            "x_min": min(axis.coordinate for axis in self.vertical_axes),
+            "x_max": max(axis.coordinate for axis in self.vertical_axes),
+            "y_min": min(axis.coordinate for axis in self.horizontal_axes),
+            "y_max": max(axis.coordinate for axis in self.horizontal_axes),
+        }
+
+    def to_dict(self, include_hierarchy: bool = True) -> Dict[str, Any]:
         geometry = self.page_geometry.to_dict()
         geometry["line_count"] = len(self.page_geometry.lines)
         geometry["shape_count"] = len(self.page_geometry.shapes)
         geometry.pop("lines", None)
         geometry.pop("shapes", None)
-        result["page_geometry"] = geometry
-        for field_name in ("horizontal_axes", "vertical_axes"):
-            values = []
-            for axis in getattr(self, field_name):
-                value = asdict(axis)
-                value["orientation"] = axis.orientation.value
-                values.append(value)
-            result[field_name] = values
+        result = {
+            "source_file": self.source_file,
+            "pdf_page": self.pdf_page,
+            "sheet_number": self.sheet_number,
+            "sheet_title": self.sheet_title,
+            "sheet_subject": self.sheet_subject.value if self.sheet_subject else None,
+            "level": self.level,
+            "segment": self.segment,
+            "page_geometry": geometry,
+            "horizontal_axes": [_axis_dict(axis) for axis in self.horizontal_axes],
+            "vertical_axes": [_axis_dict(axis) for axis in self.vertical_axes],
+            "unassigned_labels": [_label_dict(label) for label in self.unassigned_labels],
+            "rejected_candidates": [_rejected_dict(item) for item in self.rejected_candidates],
+            "confidence": self.confidence,
+            "warnings": list(self.warnings),
+            "bubble_diagnostics": dict(self.bubble_diagnostics),
+            "grid_version": self.grid_version,
+            "grid_system_id": self.grid_system_id,
+            "system_evidence": list(self.system_evidence),
+            "system_bounds": self.system_bounds,
+        }
+        if include_hierarchy:
+            result["secondary_grid_systems"] = [
+                system.to_dict(include_hierarchy=False)
+                for system in self.secondary_grid_systems
+            ]
+            result["grid_systems"] = [
+                _grid_system_summary(system) for system in self.all_grid_systems
+            ]
+            result["primary_grid_system_id"] = self.grid_system_id
+            result["secondary_grid_system_count"] = len(self.secondary_grid_systems)
+        else:
+            result["secondary_grid_systems"] = []
+            result["grid_systems"] = [_grid_system_summary(self)]
+            result["primary_grid_system_id"] = self.grid_system_id
+            result["secondary_grid_system_count"] = 0
         return result
+
+
+def _grid_system_summary(system: GridSystem) -> Dict[str, Any]:
+    return {
+        "grid_system_id": system.grid_system_id,
+        "horizontal_axis_count": len(system.horizontal_axes),
+        "vertical_axis_count": len(system.vertical_axes),
+        "confidence": system.confidence,
+        "system_bounds": system.system_bounds,
+    }
+
+
+def _axis_dict(axis: GridAxis) -> Dict[str, Any]:
+    return {
+        "axis_id": axis.axis_id,
+        "orientation": axis.orientation.value,
+        "normalized_label": axis.normalized_label,
+        "alternate_labels": list(axis.alternate_labels),
+        "coordinate": axis.coordinate,
+        "start_x": axis.start_x,
+        "start_y": axis.start_y,
+        "end_x": axis.end_x,
+        "end_y": axis.end_y,
+        "source_segments": [_line_dict(line) for line in axis.source_segments],
+        "label_candidates": [_label_dict(label) for label in axis.label_candidates],
+        "intersection_count": axis.intersection_count,
+        "confidence": axis.confidence,
+        "evidence": list(axis.evidence),
+        "warnings": list(axis.warnings),
+    }
+
+
+def _line_dict(line: LineSegment) -> Dict[str, Any]:
+    return {
+        "page": line.page,
+        "x1": line.x1,
+        "y1": line.y1,
+        "x2": line.x2,
+        "y2": line.y2,
+        "width": line.width,
+        "dash": tuple(line.dash),
+        "source": line.source,
+        "confidence": line.confidence,
+    }
+
+
+def _label_dict(label: GridLabel) -> Dict[str, Any]:
+    return {
+        "original_text": label.original_text,
+        "normalized_label": label.normalized_label,
+        "page": label.page,
+        "x": label.x,
+        "y": label.y,
+        "width": label.width,
+        "height": label.height,
+        "associated_shape": label.associated_shape,
+        "confidence": label.confidence,
+        "evidence": list(label.evidence),
+        "warnings": list(label.warnings),
+        "observation_id": label.observation_id,
+        "bubble_alternative_count": label.bubble_alternative_count,
+    }
+
+
+def _rejected_dict(candidate: RejectedGridCandidate) -> Dict[str, Any]:
+    return {
+        "original_text": candidate.original_text,
+        "page": candidate.page,
+        "x": candidate.x,
+        "y": candidate.y,
+        "reason": candidate.reason,
+        "evidence": list(candidate.evidence),
+    }

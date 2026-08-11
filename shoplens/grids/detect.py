@@ -34,26 +34,60 @@ def detect_grid_system(
     labels, rejected, bubble_diagnostics = _bubble_labels(geometry, items)
     x_groups = _aligned_groups(labels, "x")
     y_groups = _aligned_groups(labels, "y")
-    horizontal, horizontal_labels, multiple_horizontal = _select_axis_group(
+    horizontal_groups = _axis_groups(
         GridOrientation.HORIZONTAL, x_groups, geometry.lines, geometry
     )
-    vertical, vertical_labels, multiple_vertical = _select_axis_group(
+    vertical_groups = _axis_groups(
         GridOrientation.VERTICAL, y_groups, geometry.lines, geometry
     )
-    _attach_matching_labels(horizontal + vertical, labels)
-    horizontal_labels = [label for axis in horizontal for label in axis.label_candidates]
-    vertical_labels = [label for axis in vertical for label in axis.label_candidates]
-    assigned_ids = {id(label) for label in horizontal_labels + vertical_labels}
+    candidates = _coherent_system_candidates(horizontal_groups, vertical_groups)
+    multiple_horizontal = len(horizontal_groups) > 1
+    multiple_vertical = len(vertical_groups) > 1
+    coherent_system_count = len(candidates)
+    if candidates:
+        horizontal, vertical = candidates[0][0], candidates[0][1]
+    else:
+        horizontal, _, multiple_horizontal = _select_axis_group(
+            GridOrientation.HORIZONTAL, x_groups, geometry.lines, geometry
+        )
+        vertical, _, multiple_vertical = _select_axis_group(
+            GridOrientation.VERTICAL, y_groups, geometry.lines, geometry
+        )
+        if horizontal or vertical:
+            _set_intersections(horizontal, vertical)
+            candidates = [(horizontal, vertical, _intersection_total(horizontal, vertical))]
+    selected_axes = [axis for axes, _, _ in candidates for axis in axes] + [axis for _, axes, _ in candidates for axis in axes]
+    initially_assigned_ids = {id(label) for axis in selected_axes for label in axis.label_candidates}
+    remaining_labels = [label for label in labels if id(label) not in initially_assigned_ids]
+    candidates = _recover_candidate_systems_to_fixed_point(
+        candidates, remaining_labels, geometry.lines, geometry,
+    )
+    candidates = _rank_system_candidates(candidates)
+    coherent_system_count = len(candidates)
+    if candidates:
+        horizontal, vertical = candidates[0][0], candidates[0][1]
+    else:
+        horizontal, vertical = [], []
+    selected_axes = [axis for axes, _, _ in candidates for axis in axes] + [axis for _, axes, _ in candidates for axis in axes]
+    _attach_matching_labels(selected_axes, labels)
+    assigned_ids = {
+        id(label)
+        for axis in selected_axes
+        for label in axis.label_candidates
+    }
     unassigned = [label for label in labels if id(label) not in assigned_ids]
-    _set_intersections(horizontal, vertical)
 
     warnings = list(geometry.warnings)
     if not horizontal and not vertical:
         warnings.append("NO_DOMINANT_GRID_SYSTEM")
-    if multiple_horizontal or multiple_vertical:
+    if coherent_system_count > 1:
+        warnings.append("MULTIPLE_GRID_SYSTEMS_DETECTED")
+    if coherent_system_count > 1:
+        warnings.append("MULTIPLE_SIMILAR_GRID_SYSTEMS")
+    elif not coherent_system_count and (multiple_horizontal or multiple_vertical):
         warnings.append("MULTIPLE_SIMILAR_GRID_SYSTEMS")
     confidence = _system_confidence(horizontal, vertical)
-    return GridSystem(
+    primary = GridSystem(
         source_file=source_file,
         pdf_page=geometry.pdf_page,
         sheet_number=sheet.sheet_number if sheet else None,
@@ -69,7 +103,31 @@ def detect_grid_system(
         confidence=confidence,
         warnings=list(dict.fromkeys(warnings)),
         bubble_diagnostics=bubble_diagnostics,
+        grid_system_id=f"PAGE_{geometry.pdf_page}_DOMINANT_GRID",
+        system_evidence=_system_evidence(horizontal, vertical),
     )
+    primary.secondary_grid_systems = [
+        GridSystem(
+            source_file=source_file,
+            pdf_page=geometry.pdf_page,
+            sheet_number=primary.sheet_number,
+            sheet_title=primary.sheet_title,
+            sheet_subject=primary.sheet_subject,
+            level=primary.level,
+            segment=primary.segment,
+            page_geometry=geometry,
+            horizontal_axes=secondary_horizontal,
+            vertical_axes=secondary_vertical,
+            unassigned_labels=[],
+            rejected_candidates=[],
+            confidence=_system_confidence(secondary_horizontal, secondary_vertical),
+            warnings=[],
+            grid_system_id=f"PAGE_{geometry.pdf_page}_SECONDARY_GRID_{index}",
+            system_evidence=_system_evidence(secondary_horizontal, secondary_vertical),
+        )
+        for index, (secondary_horizontal, secondary_vertical, _) in enumerate(candidates[1:], start=1)
+    ]
+    return primary
 
 
 def _attach_matching_labels(axes: Sequence[GridAxis], labels: Sequence[GridLabel]) -> None:
@@ -299,6 +357,106 @@ def _select_axis_group(
     return ranked[0][2], ranked[0][3], multiple
 
 
+def _axis_groups(
+    orientation: GridOrientation,
+    groups: Sequence[List[GridLabel]],
+    lines: Sequence[LineSegment],
+    geometry: PageGeometry,
+) -> List[List[GridAxis]]:
+    """Build every bubble/line-supported orientation family before ranking one."""
+
+    candidates = []
+    for labels in _merge_opposite_label_groups(groups):
+        axes = _build_axes(orientation, labels, lines, geometry)
+        if axes:
+            candidates.append(axes)
+    return sorted(
+        candidates,
+        key=lambda axes: (-len(axes), -sum(axis.confidence for axis in axes)),
+    )
+
+
+def _coherent_system_candidates(
+    horizontal_groups: Sequence[Sequence[GridAxis]],
+    vertical_groups: Sequence[Sequence[GridAxis]],
+) -> List[Tuple[List[GridAxis], List[GridAxis], int]]:
+    """Partition bubble-supported axes by their actual intersection graph."""
+
+    horizontal = list({id(axis): axis for group in horizontal_groups for axis in group}.values())
+    vertical = list({id(axis): axis for group in vertical_groups for axis in group}.values())
+    adjacency = {id(axis): set() for axis in horizontal + vertical}
+    by_id = {id(axis): axis for axis in horizontal + vertical}
+    for h_axis in horizontal:
+        for v_axis in vertical:
+            if _axes_intersect(h_axis, v_axis):
+                adjacency[id(h_axis)].add(id(v_axis))
+                adjacency[id(v_axis)].add(id(h_axis))
+
+    candidates = []
+    visited = set()
+    for start in adjacency:
+        if start in visited or not adjacency[start]:
+            continue
+        component = set()
+        pending = [start]
+        while pending:
+            current = pending.pop()
+            if current in component:
+                continue
+            component.add(current)
+            pending.extend(adjacency[current] - component)
+        visited.update(component)
+        component_horizontal = [axis for axis in horizontal if id(axis) in component]
+        component_vertical = [axis for axis in vertical if id(axis) in component]
+        intersections = _intersection_total(component_horizontal, component_vertical)
+        if len(component_horizontal) < 2 or len(component_vertical) < 2 or intersections < 3:
+            continue
+        _set_intersections(component_horizontal, component_vertical)
+        candidates.append((component_horizontal, component_vertical, intersections))
+    return _rank_system_candidates(candidates)
+
+
+def _rank_system_candidates(
+    candidates: Sequence[Tuple[List[GridAxis], List[GridAxis], int]],
+) -> List[Tuple[List[GridAxis], List[GridAxis], int]]:
+    """Rank coherent systems from their final, fully supported axis sets."""
+
+    return sorted(
+        candidates,
+        key=lambda value: (
+            -(len(value[0]) + len(value[1])),
+            -value[2],
+            -_system_confidence(value[0], value[1]),
+            min((axis.coordinate for axis in value[1]), default=float("inf")),
+            min((axis.coordinate for axis in value[0]), default=float("inf")),
+        ),
+    )
+
+
+def _intersection_total(
+    horizontal: Sequence[GridAxis], vertical: Sequence[GridAxis]
+) -> int:
+    return sum(_axes_intersect(axis, other) for axis in horizontal for other in vertical)
+
+
+def _axes_intersect(horizontal: GridAxis, vertical: GridAxis) -> bool:
+    return (
+        min(horizontal.start_x, horizontal.end_x) <= vertical.coordinate <= max(horizontal.start_x, horizontal.end_x)
+        and min(vertical.start_y, vertical.end_y) <= horizontal.coordinate <= max(vertical.start_y, vertical.end_y)
+    )
+
+
+def _system_evidence(horizontal: Sequence[GridAxis], vertical: Sequence[GridAxis]) -> List[str]:
+    if not horizontal or not vertical:
+        return []
+    return [
+        "ORTHOGONAL_AXIS_FAMILIES",
+        f"HORIZONTAL_AXIS_COUNT:{len(horizontal)}",
+        f"VERTICAL_AXIS_COUNT:{len(vertical)}",
+        f"PERPENDICULAR_INTERSECTIONS:{_intersection_total(horizontal, vertical)}",
+    ]
+
+
 def _merge_opposite_label_groups(
     groups: Sequence[List[GridLabel]],
 ) -> List[List[GridLabel]]:
@@ -333,51 +491,318 @@ def _build_axes(
         by_label[label.normalized_label].append(label)
     axes = []
     for normalized, candidates in by_label.items():
-        label_coordinate = median(
-            [
-                label.center_y if orientation == GridOrientation.HORIZONTAL else label.center_x
-                for label in candidates
+        for label_cluster in _spatial_label_clusters(candidates, orientation):
+            label_coordinate = median(
+                [
+                    label.center_y if orientation == GridOrientation.HORIZONTAL else label.center_x
+                    for label in label_cluster
+                ]
+            )
+            coordinate = _snap_axis_coordinate(lines, orientation, label_coordinate)
+            aligned = [line for line in lines if _line_matches(line, orientation, coordinate)]
+            span = geometry.width if orientation == GridOrientation.HORIZONTAL else geometry.height
+            if not aligned:
+                continue
+            component = _matching_line_component(aligned, orientation, label_cluster)
+            if component is None:
+                continue
+            if orientation == GridOrientation.HORIZONTAL:
+                starts = [value for line in component for value in (line.x1, line.x2)]
+                start_x, end_x = min(starts), max(starts)
+                start_x, end_x = _cap_extent_to_labels(
+                    start_x,
+                    end_x,
+                    [label.center_x for label in label_cluster],
+                    (geometry.crop_box[0] + geometry.crop_box[2]) / 2.0,
+                )
+                start_y = end_y = coordinate
+            else:
+                starts = [value for line in component for value in (line.y1, line.y2)]
+                start_y, end_y = min(starts), max(starts)
+                start_y, end_y = _cap_extent_to_labels(
+                    start_y,
+                    end_y,
+                    [label.center_y for label in label_cluster],
+                    (geometry.crop_box[1] + geometry.crop_box[3]) / 2.0,
+                )
+                start_x = end_x = coordinate
+            covered = _covered_length(component, orientation, (start_x, end_x, start_y, end_y))
+            if covered < span * 0.04:
+                continue
+            evidence = [
+                "ALIGNED_GRID_LABEL_BUBBLES",
+                f"COLLINEAR_SEGMENTS:{len(component)}",
+                f"SEGMENT_COVERAGE:{covered / span:.3f}",
             ]
-        )
-        coordinate = _snap_axis_coordinate(lines, orientation, label_coordinate)
-        aligned = [line for line in lines if _line_matches(line, orientation, coordinate)]
-        span = geometry.width if orientation == GridOrientation.HORIZONTAL else geometry.height
-        if not aligned:
-            continue
-        if orientation == GridOrientation.HORIZONTAL:
-            starts = [value for line in aligned for value in (line.x1, line.x2)]
-            start_x, end_x = min(starts), max(starts)
-            start_x, end_x = _cap_extent_to_labels(
-                start_x,
-                end_x,
-                [label.center_x for label in candidates],
-                (geometry.crop_box[0] + geometry.crop_box[2]) / 2.0,
+            repeated_observations = _distinct_observation_count(label_cluster)
+            if repeated_observations > 1:
+                evidence.append("LABEL_REPEATED_AT_OPPOSITE_ENDS")
+            suffix = "" if len(candidates) == 1 else f":{coordinate:.1f}"
+            axes.append(
+                GridAxis(
+                    axis_id=f"{orientation.value}:{normalized}{suffix}",
+                    orientation=orientation,
+                    normalized_label=normalized,
+                    alternate_labels=[],
+                    coordinate=coordinate,
+                    start_x=start_x,
+                    start_y=start_y,
+                    end_x=end_x,
+                    end_y=end_y,
+                    source_segments=component,
+                    label_candidates=list(label_cluster),
+                    intersection_count=0,
+                    confidence=min(0.94, 0.68 + min(0.16, covered / span * 0.12) + (0.08 if repeated_observations > 1 else 0.0)),
+                    evidence=evidence,
+                )
             )
-            start_y = end_y = coordinate
+    return sorted(axes, key=lambda axis: axis.coordinate)
+
+
+def _spatial_label_clusters(
+    labels: Sequence[GridLabel], orientation: GridOrientation
+) -> List[List[GridLabel]]:
+    """Keep repeated labels on disconnected axes as separate observations."""
+
+    coordinate = (
+        (lambda label: label.center_y)
+        if orientation == GridOrientation.HORIZONTAL
+        else (lambda label: label.center_x)
+    )
+    clusters: List[List[GridLabel]] = []
+    for label in sorted(labels, key=coordinate):
+        if clusters and abs(coordinate(label) - median([coordinate(item) for item in clusters[-1]])) <= ALIGNMENT_TOLERANCE:
+            clusters[-1].append(label)
         else:
-            starts = [value for line in aligned for value in (line.y1, line.y2)]
-            start_y, end_y = min(starts), max(starts)
-            start_y, end_y = _cap_extent_to_labels(
-                start_y,
-                end_y,
-                [label.center_y for label in candidates],
-                (geometry.crop_box[1] + geometry.crop_box[3]) / 2.0,
-            )
-            start_x = end_x = coordinate
-        covered = _covered_length(aligned, orientation, (start_x, end_x, start_y, end_y))
-        if covered < span * 0.04:
-            continue
-        evidence = [
-            "ALIGNED_GRID_LABEL_BUBBLES",
-            f"COLLINEAR_SEGMENTS:{len(aligned)}",
-            f"SEGMENT_COVERAGE:{covered / span:.3f}",
+            clusters.append([label])
+    return clusters
+
+
+def _matching_line_component(
+    lines: Sequence[LineSegment],
+    orientation: GridOrientation,
+    labels: Sequence[GridLabel],
+) -> Optional[List[LineSegment]]:
+    """Select the continuous projected line extent supported by this label cluster."""
+
+    positions = [
+        label.center_x if orientation == GridOrientation.HORIZONTAL else label.center_y
+        for label in labels
+    ]
+    components = _line_extent_components(lines, orientation, positions)
+    if not components:
+        return None
+    return max(
+        components,
+        key=lambda component: (
+            _labels_near_component(positions, component, orientation),
+            -_component_distance(positions, component, orientation),
+            _covered_length(component, orientation),
+        ),
+    )
+
+
+def _line_extent_components(
+    lines: Sequence[LineSegment],
+    orientation: GridOrientation,
+    label_positions: Sequence[float] = (),
+) -> List[List[LineSegment]]:
+    """Split collinear drafting geometry without letting minor strokes bridge grids."""
+
+    intervals = []
+    for line in lines:
+        low, high = sorted((line.x1, line.x2) if orientation == GridOrientation.HORIZONTAL else (line.y1, line.y2))
+        if high > low:
+            intervals.append((low, high, line))
+    if not intervals:
+        return []
+    lengths = [high - low for low, high, _ in intervals]
+    max_length = max(lengths)
+    substantial_lengths = [
+        length for length in lengths if length >= max_length * 0.10
+    ]
+    substantial_intervals = [
+        interval for interval in intervals if interval[1] - interval[0] >= max_length * 0.10
+    ]
+    typical_length = median(substantial_lengths or lengths)
+    # Native path extraction can split a dashed stroke at approximately 4.4
+    # PDF points. Keep those recurring fragments continuous, while leaving
+    # materially larger gaps for the guarded, label-rooted path below.
+    continuity_gap = max(ORIENTATION_TOLERANCE * 2.5, typical_length * 0.20)
+
+    # The relative threshold makes the longest interval substantial whenever
+    # there is usable geometry. Keep this defensive fallback so malformed or
+    # future interval selection cannot silently discard all short geometry.
+    if not substantial_intervals:
+        return _interval_components(intervals, continuity_gap)
+
+    substantial_components = _interval_components(
+        substantial_intervals, continuity_gap
+    )
+    component_bounds = [
+        _component_extent(component, orientation)
+        for component in substantial_components
+    ]
+    attachments: List[List[LineSegment]] = [
+        [] for _ in substantial_components
+    ]
+    substantial_ids = {id(line) for _, _, line in substantial_intervals}
+    minor_intervals = [
+        interval for interval in intervals if id(interval[2]) not in substantial_ids
+    ]
+    isolated_minor_components = []
+    for minor_component in _interval_components(minor_intervals, continuity_gap):
+        low, high = _component_extent(minor_component, orientation)
+        compatible = [
+            (index, _interval_distance(low, high, start, end))
+            for index, (start, end) in enumerate(component_bounds)
+            if _interval_distance(low, high, start, end) <= continuity_gap
         ]
-        repeated_observations = _distinct_observation_count(candidates)
-        if repeated_observations > 1:
-            evidence.append("LABEL_REPEATED_AT_OPPOSITE_ENDS")
-        axes.append(
-            GridAxis(
-                axis_id=f"{orientation.value}:{normalized}",
+        if len(compatible) == 1:
+            attachments[compatible[0][0]].extend(minor_component)
+        elif not compatible:
+            # Minor geometry that is independent of every structural component
+            # can remain a selectable isolated extent.
+            isolated_minor_components.append(minor_component)
+        else:
+            # A minor run compatible with two structural components could be a
+            # detail-stroke bridge. It must not participate in axis matching:
+            # making it selectable lets nearby labels prefer the bridge itself.
+            continue
+
+    components = [
+        component + attached
+        for component, attached in zip(substantial_components, attachments)
+    ]
+    components.extend(isolated_minor_components)
+    # A physical grid bubble at the end of a locally continuous run is strong
+    # evidence that the intervening short primitives are a segmented axis, not
+    # an unlabeled bridge. Build this candidate before matching so the matcher
+    # only ranks valid extents.
+    components.extend(
+        component
+        for component in _interval_components(intervals, continuity_gap)
+        if _endpoint_label_supported(
+            component, orientation, label_positions, continuity_gap
+        )
+    )
+    components.extend(
+        _label_rooted_structural_runs(
+            substantial_intervals,
+            orientation,
+            label_positions,
+            continuity_gap,
+        )
+    )
+    return sorted(
+        components,
+        key=lambda component: _component_extent(component, orientation)[0],
+    )
+
+
+def _label_rooted_structural_runs(
+    intervals: Sequence[Tuple[float, float, LineSegment]],
+    orientation: GridOrientation,
+    label_positions: Sequence[float],
+    continuity_gap: float,
+) -> List[List[LineSegment]]:
+    """Recover a label-supported run of recurring substantial fragments.
+
+    This is deliberately narrower than general collinear continuity: it only
+    spans repeated substantial fragments and requires a physical label near a
+    resulting endpoint. Minor strokes never provide the links, so an unlabeled
+    detail bridge cannot combine otherwise separated structural extents.
+    """
+
+    if len(intervals) < 3 or not label_positions:
+        return []
+    cadence_intervals = _outer_intervals(intervals)
+    if len(cadence_intervals) < 3:
+        return []
+    typical_length = median(high - low for low, high, _ in cadence_intervals)
+    structural_gap = max(continuity_gap, typical_length)
+    return [
+        component
+        for component in _interval_components(cadence_intervals, structural_gap)
+        if len(component) >= 3
+        and _endpoint_label_supported(
+            component, orientation, label_positions, structural_gap
+        )
+    ]
+
+
+def _outer_intervals(
+    intervals: Sequence[Tuple[float, float, LineSegment]],
+) -> List[Tuple[float, float, LineSegment]]:
+    """Keep interval fragments that advance the projected structural extent."""
+
+    outer: List[Tuple[float, float, LineSegment]] = []
+    greatest_high: Optional[float] = None
+    for interval in sorted(intervals, key=lambda value: (value[0], -value[1])):
+        if greatest_high is not None and interval[1] <= greatest_high:
+            continue
+        outer.append(interval)
+        greatest_high = interval[1]
+    return outer
+
+
+def _recover_perpendicular_supported_axes(
+    orientation: GridOrientation,
+    labels: Sequence[GridLabel],
+    lines: Sequence[LineSegment],
+    geometry: PageGeometry,
+    opposite_axes: Sequence[GridAxis],
+) -> List[GridAxis]:
+    """Recover a full label-rooted extent only when the grid supports it twice."""
+
+    by_label: Dict[str, List[GridLabel]] = defaultdict(list)
+    for label in labels:
+        by_label[label.normalized_label].append(label)
+    recovered = []
+    for normalized, candidates in by_label.items():
+        for label_cluster in _spatial_label_clusters(candidates, orientation):
+            label_coordinate = median([
+                label.center_y if orientation == GridOrientation.HORIZONTAL else label.center_x
+                for label in label_cluster
+            ])
+            coordinate = _snap_axis_coordinate(lines, orientation, label_coordinate)
+            aligned = [line for line in lines if _line_matches(line, orientation, coordinate)]
+            if not aligned:
+                continue
+            span = geometry.width if orientation == GridOrientation.HORIZONTAL else geometry.height
+            locally_matched = _matching_line_component(aligned, orientation, label_cluster)
+            if locally_matched is None or _covered_length(locally_matched, orientation) >= span * 0.04:
+                # This recovery is only for a label whose local component is
+                # too short to become an axis. A separately viable component
+                # belongs to normal system selection, not this fallback.
+                continue
+            positions = [
+                label.center_x if orientation == GridOrientation.HORIZONTAL else label.center_y
+                for label in label_cluster
+            ]
+            # The physical bubble must support an endpoint of the full extent,
+            # not merely an interior detail stroke.
+            if not _endpoint_label_supported(aligned, orientation, positions, 0.0):
+                continue
+            if orientation == GridOrientation.HORIZONTAL:
+                values = [value for line in aligned for value in (line.x1, line.x2)]
+                start_x, end_x = _cap_extent_to_labels(
+                    min(values), max(values), positions,
+                    (geometry.crop_box[0] + geometry.crop_box[2]) / 2.0,
+                )
+                start_y = end_y = coordinate
+            else:
+                values = [value for line in aligned for value in (line.y1, line.y2)]
+                start_y, end_y = _cap_extent_to_labels(
+                    min(values), max(values), positions,
+                    (geometry.crop_box[1] + geometry.crop_box[3]) / 2.0,
+                )
+                start_x = end_x = coordinate
+            covered = _covered_length(aligned, orientation, (start_x, end_x, start_y, end_y))
+            if covered < span * 0.04:
+                continue
+            axis = GridAxis(
+                axis_id=f"{orientation.value}:{normalized}:{coordinate:.1f}",
                 orientation=orientation,
                 normalized_label=normalized,
                 alternate_labels=[],
@@ -387,13 +812,182 @@ def _build_axes(
                 end_x=end_x,
                 end_y=end_y,
                 source_segments=aligned,
-                label_candidates=list(candidates),
+                label_candidates=list(label_cluster),
                 intersection_count=0,
-                confidence=min(0.94, 0.68 + min(0.16, covered / span * 0.12) + (0.08 if repeated_observations > 1 else 0.0)),
-                evidence=evidence,
+                confidence=min(0.94, 0.68 + min(0.16, covered / span * 0.12)),
+                evidence=[
+                    "ALIGNED_GRID_LABEL_BUBBLES",
+                    "LABEL_ROOTED_PERPENDICULAR_RECOVERY",
+                    f"COLLINEAR_SEGMENTS:{len(aligned)}",
+                    f"SEGMENT_COVERAGE:{covered / span:.3f}",
+                ],
             )
-        )
-    return sorted(axes, key=lambda axis: axis.coordinate)
+            intersections = sum(
+                _axes_intersect(axis, other)
+                if orientation == GridOrientation.HORIZONTAL
+                else _axes_intersect(other, axis)
+                for other in opposite_axes
+            )
+            if intersections < 2:
+                continue
+            axis.intersection_count = intersections
+            recovered.append(axis)
+    return sorted(recovered, key=lambda axis: axis.coordinate)
+
+
+def _recover_candidate_axes_to_fixed_point(
+    horizontal: Sequence[GridAxis],
+    vertical: Sequence[GridAxis],
+    labels: Sequence[GridLabel],
+    lines: Sequence[LineSegment],
+    geometry: PageGeometry,
+) -> Tuple[List[GridAxis], List[GridAxis]]:
+    """Recover one coherent system until no additional labelled axis is valid."""
+
+    final = _recover_candidate_systems_to_fixed_point(
+        [(list(horizontal), list(vertical), _intersection_total(horizontal, vertical))],
+        labels,
+        lines,
+        geometry,
+    )
+    final_horizontal, final_vertical, _ = final[0]
+    original_horizontal = {id(axis) for axis in horizontal}
+    original_vertical = {id(axis) for axis in vertical}
+    return (
+        [axis for axis in final_horizontal if id(axis) not in original_horizontal],
+        [axis for axis in final_vertical if id(axis) not in original_vertical],
+    )
+
+
+def _recover_candidate_systems_to_fixed_point(
+    candidates: Sequence[Tuple[List[GridAxis], List[GridAxis], int]],
+    labels: Sequence[GridLabel],
+    lines: Sequence[LineSegment],
+    geometry: PageGeometry,
+) -> List[Tuple[List[GridAxis], List[GridAxis], int]]:
+    """Recover each coherent system locally, without cross-system label claims.
+
+    Each accepted axis consumes at least one finite physical label observation.
+    That bounds the monotonic loop by the number of remaining labels rather
+    than an arbitrary iteration limit. A label proposed by more than one
+    system (or for both orientations) remains unassigned and diagnostic.
+    """
+
+    systems = [(list(horizontal), list(vertical)) for horizontal, vertical, _ in candidates]
+    available = list(labels)
+    for _ in range(len(available)):
+        proposals = []
+        for system_index, (horizontal, vertical) in enumerate(systems):
+            proposals.extend(
+                (system_index, GridOrientation.HORIZONTAL, axis)
+                for axis in _recover_perpendicular_supported_axes(
+                    GridOrientation.HORIZONTAL, available, lines, geometry, vertical,
+                )
+            )
+            proposals.extend(
+                (system_index, GridOrientation.VERTICAL, axis)
+                for axis in _recover_perpendicular_supported_axes(
+                    GridOrientation.VERTICAL, available, lines, geometry, horizontal,
+                )
+            )
+        if not proposals:
+            break
+
+        claimants: Dict[int, set[Tuple[int, GridOrientation]]] = defaultdict(set)
+        for system_index, orientation, axis in proposals:
+            for label in axis.label_candidates:
+                claimants[id(label)].add((system_index, orientation))
+        accepted = [
+            (system_index, orientation, axis)
+            for system_index, orientation, axis in proposals
+            if axis.label_candidates
+            and all(len(claimants[id(label)]) == 1 for label in axis.label_candidates)
+        ]
+        if not accepted:
+            break
+
+        consumed = set()
+        for system_index, orientation, axis in accepted:
+            label_ids = {id(label) for label in axis.label_candidates}
+            if label_ids & consumed:
+                continue
+            systems[system_index][0 if orientation == GridOrientation.HORIZONTAL else 1].append(axis)
+            consumed.update(label_ids)
+        if not consumed:
+            break
+        available = [label for label in available if id(label) not in consumed]
+
+    recovered = []
+    for horizontal, vertical in systems:
+        _set_intersections(horizontal, vertical)
+        recovered.append((horizontal, vertical, _intersection_total(horizontal, vertical)))
+    return recovered
+
+
+def _interval_components(
+    intervals: Sequence[Tuple[float, float, LineSegment]], continuity_gap: float
+) -> List[List[LineSegment]]:
+    """Partition sorted projected intervals using the established gap tolerance."""
+
+    components: List[List[LineSegment]] = []
+    current: List[LineSegment] = []
+    current_high: Optional[float] = None
+    for low, high, line in sorted(intervals, key=lambda value: (value[0], value[1])):
+        if current and current_high is not None and low > current_high + continuity_gap:
+            components.append(current)
+            current = []
+            current_high = None
+        current.append(line)
+        current_high = high if current_high is None else max(current_high, high)
+    if current:
+        components.append(current)
+    return components
+
+
+def _interval_distance(low: float, high: float, start: float, end: float) -> float:
+    """Return the gap between two projected intervals, or zero when they overlap."""
+
+    return max(start - high, low - end, 0.0)
+
+
+def _endpoint_label_supported(
+    component: Sequence[LineSegment],
+    orientation: GridOrientation,
+    label_positions: Sequence[float],
+    continuity_gap: float,
+) -> bool:
+    """Return whether a physical grid label directly supports a minor-run endpoint."""
+
+    start, end = _component_extent(component, orientation)
+    tolerance = max(ALIGNMENT_TOLERANCE * 2.0, continuity_gap)
+    return any(
+        min(abs(position - start), abs(position - end)) <= tolerance
+        for position in label_positions
+    )
+
+
+def _labels_near_component(
+    positions: Sequence[float], component: Sequence[LineSegment], orientation: GridOrientation
+) -> int:
+    low, high = _component_extent(component, orientation)
+    tolerance = max(ALIGNMENT_TOLERANCE * 2.0, (high - low) * 0.12)
+    return sum(low - tolerance <= position <= high + tolerance for position in positions)
+
+
+def _component_distance(
+    positions: Sequence[float], component: Sequence[LineSegment], orientation: GridOrientation
+) -> float:
+    low, high = _component_extent(component, orientation)
+    return sum(max(low - position, 0.0, position - high) for position in positions)
+
+
+def _component_extent(component: Sequence[LineSegment], orientation: GridOrientation) -> Tuple[float, float]:
+    values = [
+        value
+        for line in component
+        for value in ((line.x1, line.x2) if orientation == GridOrientation.HORIZONTAL else (line.y1, line.y2))
+    ]
+    return min(values), max(values)
 
 
 def _line_matches(line: LineSegment, orientation: GridOrientation, coordinate: float) -> bool:
@@ -473,10 +1067,19 @@ def _covered_length(
 
 
 def _set_intersections(horizontal: Sequence[GridAxis], vertical: Sequence[GridAxis]) -> None:
+    """Derive symmetric intersection metadata from a candidate's final axes."""
+
+    for axis in [*horizontal, *vertical]:
+        axis.confidence = _axis_base_confidence(axis)
+        axis.intersection_count = 0
+        axis.evidence[:] = [
+            evidence
+            for evidence in axis.evidence
+            if not evidence.startswith("PERPENDICULAR_INTERSECTIONS:")
+        ]
     for axis in horizontal:
         axis.intersection_count = sum(
-            axis.start_x <= other.coordinate <= axis.end_x
-            and other.start_y <= axis.coordinate <= other.end_y
+            _axes_intersect(axis, other)
             for other in vertical
         )
         if axis.intersection_count:
@@ -484,13 +1087,29 @@ def _set_intersections(horizontal: Sequence[GridAxis], vertical: Sequence[GridAx
             axis.confidence = min(0.98, axis.confidence + 0.04)
     for axis in vertical:
         axis.intersection_count = sum(
-            other.start_x <= axis.coordinate <= other.end_x
-            and axis.start_y <= other.coordinate <= axis.end_y
+            _axes_intersect(other, axis)
             for other in horizontal
         )
         if axis.intersection_count:
             axis.evidence.append(f"PERPENDICULAR_INTERSECTIONS:{axis.intersection_count}")
             axis.confidence = min(0.98, axis.confidence + 0.04)
+
+
+def _axis_base_confidence(axis: GridAxis) -> float:
+    """Rebuild confidence so graph recomputation never accumulates boosts."""
+
+    coverage = next(
+        (
+            float(evidence.split(":", 1)[1])
+            for evidence in axis.evidence
+            if evidence.startswith("SEGMENT_COVERAGE:")
+        ),
+        None,
+    )
+    if coverage is None:
+        return max(0.0, axis.confidence - (0.04 if axis.intersection_count else 0.0))
+    repeated = "LABEL_REPEATED_AT_OPPOSITE_ENDS" in axis.evidence
+    return min(0.94, 0.68 + min(0.16, coverage * 0.12) + (0.08 if repeated else 0.0))
 
 
 def _system_confidence(horizontal: Sequence[GridAxis], vertical: Sequence[GridAxis]) -> float:

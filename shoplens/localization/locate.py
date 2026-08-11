@@ -34,6 +34,7 @@ class _LocalizationContext:
     outside_horizontal_bounds: bool
     outside_vertical_bounds: bool
     axis_extent_incomplete: bool
+    candidate_system_ids: Tuple[str, ...]
 
     @property
     def complete_bay(self) -> bool:
@@ -62,6 +63,7 @@ def localize_section_detections(
     systems = _grid_list(grids)
     localized = [_localize(item, systems) for item in records]
     selected_grid = systems[0] if systems else None
+    primary_only = [_localize(item, [selected_grid]) for item in records] if selected_grid else localized
     warnings = []
     if not systems:
         warnings.append("NO_GRID_SYSTEM")
@@ -84,6 +86,12 @@ def localize_section_detections(
         detections=localized,
         warnings=warnings,
         record_mode=record_mode,
+        grid_systems=systems,
+        primary_grid_system_id=_grid_id(selected_grid) if selected_grid else None,
+        secondary_grid_system_count=max(0, len(systems) - 1),
+        outside_grid_count_before_secondary=sum(
+            item.localization_status == "OUTSIDE_GRID" for item in primary_only
+        ),
     )
 
 
@@ -193,6 +201,7 @@ def _localized_detection(
         outside_vertical_bounds=context.outside_vertical_bounds,
         axis_extent_incomplete=context.axis_extent_incomplete,
         localization_status=status,
+        candidate_grid_system_ids=list(context.candidate_system_ids),
     )
 
 
@@ -220,6 +229,7 @@ def _localization_context(
         inside, on_h, on_v,
         len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.12,
         outside_horizontal, outside_vertical, extent_incomplete,
+        tuple(_grid_id(candidate) for score, candidate in ranked if ranked[0][0] - score < 0.12),
     )
 
 
@@ -286,7 +296,16 @@ def _empty_localization(detection: ClassifiedSectionDetection, x: float, y: floa
 def _grid_list(grids: Union[GridSystem, Sequence[GridSystem], None]) -> List[GridSystem]:
     if grids is None:
         return []
-    return [grids] if isinstance(grids, GridSystem) else list(grids)
+    candidates = [grids] if isinstance(grids, GridSystem) else list(grids)
+    systems: List[GridSystem] = []
+    seen = set()
+    for candidate in candidates:
+        for system in candidate.all_grid_systems:
+            identity = id(system)
+            if identity not in seen:
+                systems.append(system)
+                seen.add(identity)
+    return systems
 
 
 def _nearest(axes: Sequence[GridAxis], coordinate: float) -> Optional[GridAxis]:
@@ -356,7 +375,7 @@ def _system_score(grid: GridSystem, x: float, y: float) -> float:
 
 
 def _grid_id(grid: GridSystem) -> str:
-    return f"PAGE_{grid.pdf_page}_DOMINANT_GRID"
+    return grid.grid_system_id or f"PAGE_{grid.pdf_page}_DOMINANT_GRID"
 
 
 def _ambiguous_label(label: str) -> bool:

@@ -24,16 +24,25 @@ def export_grid_svg(path: Union[str, Path], grid: GridSystem, include_rejected: 
         },
     )
     SubElement(root, "rect", {"x": "0", "y": "0", "width": str(geometry.width), "height": str(geometry.height), "fill": "white", "stroke": "#222"})
-    for axis in grid.horizontal_axes + grid.vertical_axes:
-        sx, sy = point(axis.start_x, axis.start_y)
-        ex, ey = point(axis.end_x, axis.end_y)
-        color = "#2563eb" if axis.orientation == GridOrientation.VERTICAL else "#dc2626"
-        SubElement(root, "line", {"x1": str(sx), "y1": str(sy), "x2": str(ex), "y2": str(ey), "stroke": color, "stroke-width": "2", "opacity": "0.8"})
-        for label in axis.label_candidates:
-            lx, ly = point(label.center_x, label.center_y)
-            SubElement(root, "circle", {"cx": str(lx), "cy": str(ly), "r": "14", "fill": "none", "stroke": color, "stroke-width": "2"})
-            text = SubElement(root, "text", {"x": str(lx), "y": str(ly + 4), "text-anchor": "middle", "font-size": "10", "fill": color})
-            text.text = label.normalized_label
+    for system_index, system in enumerate(grid.all_grid_systems):
+        for axis in system.horizontal_axes + system.vertical_axes:
+            sx, sy = point(axis.start_x, axis.start_y)
+            ex, ey = point(axis.end_x, axis.end_y)
+            color = (
+                "#2563eb" if axis.orientation == GridOrientation.VERTICAL else "#dc2626"
+            ) if system_index == 0 else (
+                "#7c3aed" if axis.orientation == GridOrientation.VERTICAL else "#c026d3"
+            )
+            SubElement(root, "line", {
+                "x1": str(sx), "y1": str(sy), "x2": str(ex), "y2": str(ey),
+                "stroke": color, "stroke-width": "2", "opacity": "0.8",
+                "data-grid-system": system.grid_system_id,
+            })
+            for label in axis.label_candidates:
+                lx, ly = point(label.center_x, label.center_y)
+                SubElement(root, "circle", {"cx": str(lx), "cy": str(ly), "r": "14", "fill": "none", "stroke": color, "stroke-width": "2"})
+                text = SubElement(root, "text", {"x": str(lx), "y": str(ly + 4), "text-anchor": "middle", "font-size": "10", "fill": color})
+                text.text = label.normalized_label
     for label in grid.unassigned_labels:
         lx, ly = point(label.center_x, label.center_y)
         SubElement(root, "circle", {"cx": str(lx), "cy": str(ly), "r": "12", "fill": "none", "stroke": "#f59e0b", "stroke-width": "2"})
