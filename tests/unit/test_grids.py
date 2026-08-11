@@ -23,6 +23,9 @@ from shoplens.geometry.adapter import _deduplicate_lines
 from shoplens.geometry.transforms import to_positioned_coordinates, transform_box
 from shoplens.grids import GridOrientation, detect_grid_system, export_grid_svg
 from shoplens.grids.detect import GRID_LABEL_RE, _line_extent_components
+from shoplens.grids.detect import _matching_line_component
+from shoplens.grids.detect import _recover_perpendicular_supported_axes
+from shoplens.grids.models import GridAxis, GridLabel
 from shoplens.title_blocks.models import SheetRecordSource
 
 
@@ -442,7 +445,7 @@ class GridDetectionTests(unittest.TestCase):
         ]
 
         self.assertEqual(substantial_components, [left, right])
-        self.assertIn(bridge, components)
+        self.assertNotIn(bridge, components)
 
     def test_tiny_collinear_strokes_cannot_bridge_separate_vertical_extents(self):
         lower = [
@@ -468,7 +471,198 @@ class GridDetectionTests(unittest.TestCase):
         ]
 
         self.assertEqual(substantial_components, [lower, upper])
-        self.assertIn(bridge, components)
+        self.assertNotIn(bridge, components)
+
+    def test_label_closest_to_ambiguous_minor_bridge_selects_structural_extent(self):
+        left = [
+            LineSegment(1, 0.0, 20.0, 200.0, 20.0),
+            LineSegment(1, 210.0, 20.0, 410.0, 20.0),
+        ]
+        right = [
+            LineSegment(1, 700.0, 20.0, 900.0, 20.0),
+            LineSegment(1, 910.0, 20.0, 1110.0, 20.0),
+        ]
+        bridge = [
+            LineSegment(1, 430.0 + index * 20.0, 20.0, 435.0 + index * 20.0, 20.0)
+            for index in range(13)
+        ]
+        label = GridLabel("A", "A", 1, 545.0, 15.0, 10.0, 10.0, "ELLIPSE", 0.8)
+
+        components = _line_extent_components(
+            [*left, *bridge, *right], GridOrientation.HORIZONTAL,
+        )
+        selected = _matching_line_component(
+            [*left, *bridge, *right], GridOrientation.HORIZONTAL, [label],
+        )
+
+        self.assertNotIn(bridge, components)
+        self.assertEqual(selected, left)
+
+    def test_endpoint_label_does_not_make_ambiguous_minor_bridge_selectable(self):
+        left = [
+            LineSegment(1, 0.0, 20.0, 200.0, 20.0),
+            LineSegment(1, 210.0, 20.0, 410.0, 20.0),
+        ]
+        right = [
+            LineSegment(1, 700.0, 20.0, 900.0, 20.0),
+            LineSegment(1, 910.0, 20.0, 1110.0, 20.0),
+        ]
+        bridge = [
+            LineSegment(1, 430.0 + index * 20.0, 20.0, 435.0 + index * 20.0, 20.0)
+            for index in range(13)
+        ]
+        label = GridLabel("A", "A", 1, 425.0, 15.0, 10.0, 10.0, "ELLIPSE", 0.8)
+
+        selected = _matching_line_component(
+            [*left, *bridge, *right], GridOrientation.HORIZONTAL, [label],
+        )
+
+        self.assertEqual(selected, left)
+
+    def test_endpoint_label_does_not_reinstate_multi_compatible_minor_run(self):
+        left = [LineSegment(1, 0.0, 20.0, 200.0, 20.0)]
+        right = [LineSegment(1, 700.0, 20.0, 900.0, 20.0)]
+        segmented_axis = [
+            LineSegment(1, 220.0 + index * 20.0, 20.0, 225.0 + index * 20.0, 20.0)
+            for index in range(23)
+        ]
+
+        components = _line_extent_components(
+            [*left, *segmented_axis, *right],
+            GridOrientation.HORIZONTAL,
+            label_positions=[215.0],
+        )
+
+        self.assertNotIn(segmented_axis, components)
+
+    def test_label_rooted_segmented_run_traverses_short_primitives(self):
+        segments = [
+            LineSegment(1, 0.0, 20.0, 180.0, 20.0),
+            *[
+                LineSegment(1, 190.0 + index * 15.0, 20.0, 195.0 + index * 15.0, 20.0)
+                for index in range(30)
+            ],
+            LineSegment(1, 650.0, 20.0, 830.0, 20.0),
+        ]
+        label = GridLabel("A", "A", 1, -15.0, 15.0, 10.0, 10.0, "ELLIPSE", 0.8)
+
+        selected = _matching_line_component(
+            segments, GridOrientation.HORIZONTAL, [label],
+        )
+
+        self.assertEqual(selected, segments)
+
+    def test_label_supported_dashed_run_crosses_small_recurring_gaps(self):
+        segments = [
+            LineSegment(1, index * 22.4, 20.0, index * 22.4 + 18.0, 20.0)
+            for index in range(30)
+        ]
+        label = GridLabel("A", "A", 1, 667.0, 15.0, 10.0, 10.0, "ELLIPSE", 0.8)
+
+        selected = _matching_line_component(
+            segments, GridOrientation.HORIZONTAL, [label],
+        )
+
+        self.assertEqual(selected, segments)
+
+    def test_label_rooted_recurring_structural_fragments_cross_large_gaps(self):
+        fragments = [
+            LineSegment(1, index * 180.0, 20.0, index * 180.0 + 100.0, 20.0)
+            for index in range(5)
+        ]
+        label = GridLabel("A", "A", 1, -15.0, 15.0, 10.0, 10.0, "ELLIPSE", 0.8)
+
+        selected = _matching_line_component(
+            fragments, GridOrientation.HORIZONTAL, [label],
+        )
+
+        self.assertEqual(selected, fragments)
+
+    def test_label_rooted_run_ignores_nested_detail_strokes_for_cadence(self):
+        fragments = [
+            LineSegment(1, index * 120.0, 20.0, index * 120.0 + 100.0, 20.0)
+            for index in range(5)
+        ]
+        details = [
+            LineSegment(1, index * 120.0 + 20.0, 20.0, index * 120.0 + 35.0, 20.0)
+            for index in range(5)
+            for _ in range(4)
+        ]
+        label = GridLabel("A", "A", 1, -15.0, 15.0, 10.0, 10.0, "ELLIPSE", 0.8)
+
+        selected = _matching_line_component(
+            [*fragments, *details], GridOrientation.HORIZONTAL, [label],
+        )
+
+        self.assertTrue(all(fragment in selected for fragment in fragments))
+
+    def test_fragmented_axis_with_intermittent_intersections_stays_structural(self):
+        lines = []
+        shapes = []
+        items = []
+        for label, x in (("A", 100.0), ("B", 200.0), ("C", 300.0)):
+            shapes.append(ellipse(x, 20.0))
+            items.append(text(label, x - 5.0, 15.0))
+            lines.append(LineSegment(1, x, 40.0, x, 360.0))
+        for label, y in (("1", 100.0), ("2", 200.0), ("3", 300.0)):
+            shapes.append(ellipse(20.0, y))
+            items.append(text(label, 15.0, y - 5.0))
+            fragments = [
+                LineSegment(1, start, y, start + 100.0, y)
+                for start in (40.0, 160.0, 280.0)
+            ]
+            details = [
+                LineSegment(1, start + 20.0, y, start + 35.0, y)
+                for start in (40.0, 160.0, 280.0)
+                for _ in range(4)
+            ]
+            lines.extend([*fragments, *details])
+        geometry = PageGeometry(
+            1, 400, 400, 0, (0, 0, 400, 400), (0, 0, 400, 400),
+            "raw", "synthetic", lines=lines, shapes=shapes,
+        )
+
+        result = detect_grid_system("drawing.pdf", geometry, items)
+
+        self.assertEqual([axis.normalized_label for axis in result.horizontal_axes], ["1", "2", "3"])
+        self.assertTrue(all(axis.intersection_count == 3 for axis in result.horizontal_axes))
+
+    def test_perpendicular_support_recovers_label_rooted_full_extent(self):
+        label = GridLabel("EB2", "EB2", 1, 95.0, 390.0, 10.0, 10.0, "ELLIPSE", 0.8)
+        fragments = [
+            LineSegment(1, 100.0, start, 100.0, start + 12.0)
+            for start in (40.0, 120.0, 200.0, 280.0, 360.0)
+        ]
+        horizontal = [
+            GridAxis(
+                f"H:{index}", GridOrientation.HORIZONTAL, str(index), [], y,
+                40.0, y, 360.0, y, [], [], 0, 0.8,
+            )
+            for index, y in enumerate((60.0, 140.0, 220.0, 300.0, 365.0), start=1)
+        ]
+        geometry = PageGeometry(
+            1, 400, 400, 0, (0, 0, 400, 400), (0, 0, 400, 400),
+            "raw", "synthetic", lines=fragments,
+        )
+
+        recovered = _recover_perpendicular_supported_axes(
+            GridOrientation.VERTICAL, [label], fragments, geometry, horizontal,
+        )
+
+        self.assertEqual([axis.normalized_label for axis in recovered], ["EB2"])
+        self.assertEqual(recovered[0].intersection_count, 5)
+
+    def test_isolated_minor_component_remains_selectable_geometry(self):
+        left = [LineSegment(1, 0.0, 20.0, 200.0, 20.0)]
+        right = [LineSegment(1, 700.0, 20.0, 900.0, 20.0)]
+        isolated = [LineSegment(1, 1200.0, 20.0, 1205.0, 20.0)]
+
+        self.assertEqual(
+            _line_extent_components(
+                [*left, *right, *isolated], GridOrientation.HORIZONTAL,
+            ),
+            [left, right, isolated],
+        )
 
     def test_minor_segments_attach_locally_without_breaking_continuous_axis(self):
         axis = [

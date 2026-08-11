@@ -59,6 +59,27 @@ def detect_grid_system(
     selected_axes = [axis for axes, _, _ in candidates for axis in axes] + [
         axis for _, axes, _ in candidates for axis in axes
     ]
+    initially_assigned_ids = {
+        id(label)
+        for axis in selected_axes
+        for label in axis.label_candidates
+    }
+    remaining_labels = [label for label in labels if id(label) not in initially_assigned_ids]
+    recovered_horizontal = _recover_perpendicular_supported_axes(
+        GridOrientation.HORIZONTAL, remaining_labels, geometry.lines, geometry, vertical,
+    )
+    recovered_vertical = _recover_perpendicular_supported_axes(
+        GridOrientation.VERTICAL,
+        remaining_labels,
+        geometry.lines,
+        geometry,
+        [*horizontal, *recovered_horizontal],
+    )
+    if recovered_horizontal or recovered_vertical:
+        horizontal.extend(recovered_horizontal)
+        vertical.extend(recovered_vertical)
+        _set_recovery_intersections(recovered_horizontal, recovered_vertical, horizontal, vertical)
+        selected_axes.extend([*recovered_horizontal, *recovered_vertical])
     _attach_matching_labels(selected_axes, labels)
     assigned_ids = {
         id(label)
@@ -567,13 +588,13 @@ def _matching_line_component(
 ) -> Optional[List[LineSegment]]:
     """Select the continuous projected line extent supported by this label cluster."""
 
-    components = _line_extent_components(lines, orientation)
-    if not components:
-        return None
     positions = [
         label.center_x if orientation == GridOrientation.HORIZONTAL else label.center_y
         for label in labels
     ]
+    components = _line_extent_components(lines, orientation, positions)
+    if not components:
+        return None
     return max(
         components,
         key=lambda component: (
@@ -585,7 +606,9 @@ def _matching_line_component(
 
 
 def _line_extent_components(
-    lines: Sequence[LineSegment], orientation: GridOrientation
+    lines: Sequence[LineSegment],
+    orientation: GridOrientation,
+    label_positions: Sequence[float] = (),
 ) -> List[List[LineSegment]]:
     """Split collinear drafting geometry without letting minor strokes bridge grids."""
 
@@ -605,7 +628,10 @@ def _line_extent_components(
         interval for interval in intervals if interval[1] - interval[0] >= max_length * 0.10
     ]
     typical_length = median(substantial_lengths or lengths)
-    continuity_gap = max(ORIENTATION_TOLERANCE * 2.0, typical_length * 0.20)
+    # Native path extraction can split a dashed stroke at approximately 4.4
+    # PDF points. Keep those recurring fragments continuous, while leaving
+    # materially larger gaps for the guarded, label-rooted path below.
+    continuity_gap = max(ORIENTATION_TOLERANCE * 2.5, typical_length * 0.20)
 
     # The relative threshold makes the longest interval substantial whenever
     # there is usable geometry. Keep this defensive fallback so malformed or
@@ -627,7 +653,7 @@ def _line_extent_components(
     minor_intervals = [
         interval for interval in intervals if id(interval[2]) not in substantial_ids
     ]
-    unassigned_minor_components = []
+    isolated_minor_components = []
     for minor_component in _interval_components(minor_intervals, continuity_gap):
         low, high = _component_extent(minor_component, orientation)
         compatible = [
@@ -637,21 +663,203 @@ def _line_extent_components(
         ]
         if len(compatible) == 1:
             attachments[compatible[0][0]].extend(minor_component)
+        elif not compatible:
+            # Minor geometry that is independent of every structural component
+            # can remain a selectable isolated extent.
+            isolated_minor_components.append(minor_component)
         else:
             # A minor run compatible with two structural components could be a
-            # detail-stroke bridge. Keep it available as geometry, but never
-            # use it to extend either component toward the other.
-            unassigned_minor_components.append(minor_component)
+            # detail-stroke bridge. It must not participate in axis matching:
+            # making it selectable lets nearby labels prefer the bridge itself.
+            continue
 
     components = [
         component + attached
         for component, attached in zip(substantial_components, attachments)
     ]
-    components.extend(unassigned_minor_components)
+    components.extend(isolated_minor_components)
+    # A physical grid bubble at the end of a locally continuous run is strong
+    # evidence that the intervening short primitives are a segmented axis, not
+    # an unlabeled bridge. Build this candidate before matching so the matcher
+    # only ranks valid extents.
+    components.extend(
+        component
+        for component in _interval_components(intervals, continuity_gap)
+        if _endpoint_label_supported(
+            component, orientation, label_positions, continuity_gap
+        )
+    )
+    components.extend(
+        _label_rooted_structural_runs(
+            substantial_intervals,
+            orientation,
+            label_positions,
+            continuity_gap,
+        )
+    )
     return sorted(
         components,
         key=lambda component: _component_extent(component, orientation)[0],
     )
+
+
+def _label_rooted_structural_runs(
+    intervals: Sequence[Tuple[float, float, LineSegment]],
+    orientation: GridOrientation,
+    label_positions: Sequence[float],
+    continuity_gap: float,
+) -> List[List[LineSegment]]:
+    """Recover a label-supported run of recurring substantial fragments.
+
+    This is deliberately narrower than general collinear continuity: it only
+    spans repeated substantial fragments and requires a physical label near a
+    resulting endpoint. Minor strokes never provide the links, so an unlabeled
+    detail bridge cannot combine otherwise separated structural extents.
+    """
+
+    if len(intervals) < 3 or not label_positions:
+        return []
+    cadence_intervals = _outer_intervals(intervals)
+    if len(cadence_intervals) < 3:
+        return []
+    typical_length = median(high - low for low, high, _ in cadence_intervals)
+    structural_gap = max(continuity_gap, typical_length)
+    return [
+        component
+        for component in _interval_components(cadence_intervals, structural_gap)
+        if len(component) >= 3
+        and _endpoint_label_supported(
+            component, orientation, label_positions, structural_gap
+        )
+    ]
+
+
+def _outer_intervals(
+    intervals: Sequence[Tuple[float, float, LineSegment]],
+) -> List[Tuple[float, float, LineSegment]]:
+    """Keep interval fragments that advance the projected structural extent."""
+
+    outer: List[Tuple[float, float, LineSegment]] = []
+    greatest_high: Optional[float] = None
+    for interval in sorted(intervals, key=lambda value: (value[0], -value[1])):
+        if greatest_high is not None and interval[1] <= greatest_high:
+            continue
+        outer.append(interval)
+        greatest_high = interval[1]
+    return outer
+
+
+def _recover_perpendicular_supported_axes(
+    orientation: GridOrientation,
+    labels: Sequence[GridLabel],
+    lines: Sequence[LineSegment],
+    geometry: PageGeometry,
+    opposite_axes: Sequence[GridAxis],
+) -> List[GridAxis]:
+    """Recover a full label-rooted extent only when the grid supports it twice."""
+
+    by_label: Dict[str, List[GridLabel]] = defaultdict(list)
+    for label in labels:
+        by_label[label.normalized_label].append(label)
+    recovered = []
+    for normalized, candidates in by_label.items():
+        for label_cluster in _spatial_label_clusters(candidates, orientation):
+            label_coordinate = median([
+                label.center_y if orientation == GridOrientation.HORIZONTAL else label.center_x
+                for label in label_cluster
+            ])
+            coordinate = _snap_axis_coordinate(lines, orientation, label_coordinate)
+            aligned = [line for line in lines if _line_matches(line, orientation, coordinate)]
+            if not aligned:
+                continue
+            span = geometry.width if orientation == GridOrientation.HORIZONTAL else geometry.height
+            locally_matched = _matching_line_component(aligned, orientation, label_cluster)
+            if locally_matched is None or _covered_length(locally_matched, orientation) >= span * 0.04:
+                # This recovery is only for a label whose local component is
+                # too short to become an axis. A separately viable component
+                # belongs to normal system selection, not this fallback.
+                continue
+            positions = [
+                label.center_x if orientation == GridOrientation.HORIZONTAL else label.center_y
+                for label in label_cluster
+            ]
+            # The physical bubble must support an endpoint of the full extent,
+            # not merely an interior detail stroke.
+            if not _endpoint_label_supported(aligned, orientation, positions, 0.0):
+                continue
+            if orientation == GridOrientation.HORIZONTAL:
+                values = [value for line in aligned for value in (line.x1, line.x2)]
+                start_x, end_x = _cap_extent_to_labels(
+                    min(values), max(values), positions,
+                    (geometry.crop_box[0] + geometry.crop_box[2]) / 2.0,
+                )
+                start_y = end_y = coordinate
+            else:
+                values = [value for line in aligned for value in (line.y1, line.y2)]
+                start_y, end_y = _cap_extent_to_labels(
+                    min(values), max(values), positions,
+                    (geometry.crop_box[1] + geometry.crop_box[3]) / 2.0,
+                )
+                start_x = end_x = coordinate
+            covered = _covered_length(aligned, orientation, (start_x, end_x, start_y, end_y))
+            if covered < span * 0.04:
+                continue
+            axis = GridAxis(
+                axis_id=f"{orientation.value}:{normalized}:{coordinate:.1f}",
+                orientation=orientation,
+                normalized_label=normalized,
+                alternate_labels=[],
+                coordinate=coordinate,
+                start_x=start_x,
+                start_y=start_y,
+                end_x=end_x,
+                end_y=end_y,
+                source_segments=aligned,
+                label_candidates=list(label_cluster),
+                intersection_count=0,
+                confidence=min(0.94, 0.68 + min(0.16, covered / span * 0.12)),
+                evidence=[
+                    "ALIGNED_GRID_LABEL_BUBBLES",
+                    "LABEL_ROOTED_PERPENDICULAR_RECOVERY",
+                    f"COLLINEAR_SEGMENTS:{len(aligned)}",
+                    f"SEGMENT_COVERAGE:{covered / span:.3f}",
+                ],
+            )
+            intersections = sum(
+                _axes_intersect(axis, other)
+                if orientation == GridOrientation.HORIZONTAL
+                else _axes_intersect(other, axis)
+                for other in opposite_axes
+            )
+            if intersections < 2:
+                continue
+            axis.intersection_count = intersections
+            axis.confidence = min(0.98, axis.confidence + 0.04)
+            axis.evidence.append(f"PERPENDICULAR_INTERSECTIONS:{intersections}")
+            recovered.append(axis)
+    return sorted(recovered, key=lambda axis: axis.coordinate)
+
+
+def _set_recovery_intersections(
+    recovered_horizontal: Sequence[GridAxis],
+    recovered_vertical: Sequence[GridAxis],
+    horizontal: Sequence[GridAxis],
+    vertical: Sequence[GridAxis],
+) -> None:
+    """Update existing intersection counters for axes added after graph selection."""
+
+    for axis in horizontal:
+        if axis in recovered_horizontal:
+            continue
+        axis.intersection_count += sum(
+            _axes_intersect(axis, recovered) for recovered in recovered_vertical
+        )
+    for axis in vertical:
+        if axis in recovered_vertical:
+            continue
+        axis.intersection_count += sum(
+            _axes_intersect(recovered, axis) for recovered in recovered_horizontal
+        )
 
 
 def _interval_components(
@@ -678,6 +886,22 @@ def _interval_distance(low: float, high: float, start: float, end: float) -> flo
     """Return the gap between two projected intervals, or zero when they overlap."""
 
     return max(start - high, low - end, 0.0)
+
+
+def _endpoint_label_supported(
+    component: Sequence[LineSegment],
+    orientation: GridOrientation,
+    label_positions: Sequence[float],
+    continuity_gap: float,
+) -> bool:
+    """Return whether a physical grid label directly supports a minor-run endpoint."""
+
+    start, end = _component_extent(component, orientation)
+    tolerance = max(ALIGNMENT_TOLERANCE * 2.0, continuity_gap)
+    return any(
+        min(abs(position - start), abs(position - end)) <= tolerance
+        for position in label_positions
+    )
 
 
 def _labels_near_component(
