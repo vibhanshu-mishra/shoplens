@@ -101,21 +101,7 @@ ShopLens also supports packages without a usable declared sheet list by retainin
 
 Structural drawing numbers are frequently split into multiple positioned-text fragments.
 
-ShopLens includes structural sheet-number grammar and reconstruction for patterns including:
-
-```text
-S103A
-S104A
-S01-10-P1
-S11-F1
-S11-OPL1
-S11-T1
-BS11-00_FR
-BS11-01_RA
-BS30-03
-```
-
-Fragmented text can be joined and ranked so complete structural sheet identities win over incomplete prefixes.
+ShopLens includes structural sheet-number grammar and reconstruction. Fragmented text can be joined and ranked so complete structural sheet identities win over incomplete prefixes.
 
 ---
 
@@ -202,7 +188,7 @@ Connected offset regions may remain part of one expanded grid when their geometr
 
 ### Section localization
 
-Detected structural sections can be localized against the detected grid system.
+Detected structural sections can be localised against the detected grid system.
 
 Every detection receives one exclusive localization status:
 
@@ -325,7 +311,7 @@ python -m shoplens.cli <command> drawing-set.pdf
 
 ### Inspect a grid system
 
-Grid extraction can operate against a resolved structural sheet rather than requiring the user to manually determine its physical PDF page.
+Grid extraction can operate on a resolved structural sheet rather than requiring the user to determine its physical PDF page manually.
 
 ```bash
 python -m shoplens.cli grid-system drawing-set.pdf --sheet S104A
