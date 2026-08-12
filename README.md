@@ -1,283 +1,691 @@
-# pdf-inspector
+# ShopLens
 
-[![Crates.io](https://img.shields.io/crates/v/pdf-inspector.svg)](https://crates.io/crates/pdf-inspector)
-[![npm](https://img.shields.io/npm/v/@firecrawl/pdf-inspector.svg)](https://www.npmjs.com/package/@firecrawl/pdf-inspector)
-[![PyPI](https://img.shields.io/pypi/v/pdf-inspector.svg)](https://pypi.org/project/pdf-inspector/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+**Structural drawing intelligence for steel construction PDFs.**
 
-Fast Rust library for PDF classification and text extraction. Detects whether a PDF is text-based or scanned, extracts text with position awareness, and converts to clean Markdown — all without OCR. Includes bindings for [Python](docs/python.md), [Node.js](napi/README.md), and [browser WebAssembly](wasm/README.md).
+ShopLens turns structural drawing sets into structured, explainable data.
 
-Built by [Firecrawl](https://firecrawl.dev) to handle text-based PDFs locally in under 200ms, skipping expensive OCR services for the ~54% of PDFs that don't need them.
+It reads native structural PDFs, identifies sheets, extracts structural steel section labels, detects drawing grid systems, and localizes section references relative to those grids — while preserving the evidence behind each result.
 
-## ShopLens
+ShopLens is designed for structural drawings from different engineers, projects, and drawing conventions rather than a single fixed template.
 
-This repository also contains the first ShopLens milestone: a separate Python
-layer that finds and normalizes structural-steel section labels in positioned
-PDF text. See [SHOPLENS.md](SHOPLENS.md) for macOS setup, CLI usage, JSON output,
-tests, and current limitations. ShopLens builds on Firecrawl's `pdf-inspector`;
-the upstream parser, attribution, and license are preserved.
+> **Current focus:** deterministic structural drawing understanding. ShopLens does not use OCR or AI to guess missing drawing information.
+
+---
+
+## What ShopLens Does
+
+A structural PDF is more than text on a page.
+
+Useful information is distributed across:
+
+* sheet lists
+* title blocks
+* drawing classifications
+* grid bubbles and grid lines
+* steel section labels
+* section/detail references
+* positioned text
+* vector geometry
+* multiple drawing regions on the same sheet
+
+ShopLens combines those signals into a structured representation of the drawing package.
+
+```text
+Structural PDF package
+        │
+        ▼
+PDF inspection
+        │
+        ├── positioned text
+        └── vector geometry
+        │
+        ▼
+Sheet discovery
+        │
+        ├── sheet list
+        ├── title blocks
+        ├── sheet-number reconstruction
+        └── physical PDF page reconciliation
+        │
+        ▼
+Package index
+        │
+        ├── sheet identity
+        ├── PDF page
+        └── drawing classification
+        │
+        ├──────────────────────┐
+        ▼                      ▼
+Steel sections             Grid systems
+        │                      │
+        │                      ├── grid bubbles
+        │                      ├── grid axes
+        │                      ├── intersections
+        │                      └── secondary systems
+        │                      │
+        └──────────┬───────────┘
+                   ▼
+          Section localization
+                   │
+                   ├── complete bay
+                   ├── on axis
+                   ├── outside grid
+                   ├── ambiguous
+                   └── unlocalized
+```
+
+---
 
 ## Features
 
-- **Smart classification** — Detect TextBased, Scanned, ImageBased, or Mixed PDFs in ~10-50ms by sampling content streams. Returns a confidence score (0.0-1.0) and per-page OCR routing.
-- **Text extraction** — Position-aware extraction with font info, X/Y coordinates, and automatic multi-column reading order.
-- **Markdown conversion** — Headings (H1-H4 via font size ratios), bullet/numbered/letter lists, code blocks (monospace font detection), tables (rectangle-based and heuristic), bold/italic formatting, URL linking, and page breaks.
-- **Table detection** — Dual-mode: rectangle-based detection from PDF drawing ops, plus heuristic detection from text alignment. Handles financial tables, footnotes, and continuation tables across pages.
-- **CID font support** — ToUnicode CMap decoding for Type0/Identity-H fonts, UTF-16BE, UTF-8, and Latin-1 encodings.
-- **Multi-column layout** — Automatic detection of newspaper-style columns, sequential reading order, and RTL text support.
-- **Encoding issue detection** — Automatically flags broken font encodings so callers can fall back to OCR.
-- **Single document load** — The document is parsed once and shared between detection and extraction, avoiding redundant I/O.
-- **Browser WebAssembly** — Run the same Rust parser locally in browsers and Web Workers, with embedded CMaps and no server round trip.
-- **Lightweight** — Pure Rust, no ML models, no external services. Single dependency on `lopdf` for PDF parsing.
+### Structural package indexing
 
-## Benchmark
+ShopLens builds a normalized index of structural sheets inside a PDF package.
 
-Evaluated on the [opendataloader-bench](https://github.com/opendataloader-project/opendataloader-bench) corpus (200 PDFs). Only local engines without model-based PDF parsing are shown; OCR was disabled. Scores are 0-1, higher is better.
+It can use:
 
-| Engine | Overall | Reading Order (NID) | Tables (TEDS) | Headings (MHS) | Speed (200 docs) |
-|---|---|---|---|---|---|
-| pdf-inspector | **0.875** | **0.915** | **0.814** | 0.788 | **0.470s** |
-| liteparse | 0.873 | 0.913 | 0.693 | **0.811** | 0.750s |
-| opendataloader | 0.831 | 0.902 | 0.489 | 0.739 | 2.569s |
-| pymupdf4llm | 0.735 | 0.886 | 0.401 | 0.424 | 17.117s |
-| markitdown | 0.589 | 0.844 | 0.273 | 0.000 | 16.165s |
+* declared sheet lists
+* detected title blocks
+* physical PDF page numbers
+* reconstructed sheet numbers
+* sheet reconciliation
+* drawing classification
 
-Results were refreshed on July 31, 2026, on an Apple M4 Pro. Engine versions were pdf-inspector 0.2.6, LiteParse 2.10.1, OpenDataLoader 2.2.1, PyMuPDF4LLM 0.2.0, and MarkItDown 0.1.5. Speed is the median of five alternating or rotating complete corpus runs after an excluded warm-up run, with each parser processing documents sequentially in a single process.
+Sheet identity is kept separate from physical PDF page identity so downstream tools can reliably request a structural sheet by its drawing number.
 
-The complete parser configuration, per-document predictions, evaluator output, and generated charts are available in the [reproducible results branch](https://github.com/firecrawl/opendataloader-bench/tree/abi/pdf-parser-benchmark-results).
+ShopLens also supports packages without a usable declared sheet list by retaining title-block-derived sheet identities.
 
-**Best fit:** Native-text PDFs where speed, reading order, and table structure matter. In this comparison, pdf-inspector delivered the higher overall, reading-order, and table scores, along with the fastest complete run. That makes it a strong local default for reports, research papers, financial documents, invoices, and legal PDFs that need clean, structured Markdown without adding OCR latency or infrastructure.
+---
 
-Use the [paired benchmark harness](docs/benchmarking.md) to compare two local builds against the exact same corpus and evaluator revision.
+### Sheet-number reconstruction
 
-## Quick start
+Structural drawing numbers are frequently split into multiple positioned-text fragments.
 
-### Python
+ShopLens includes structural sheet-number grammar and reconstruction for patterns including:
+
+```text
+S103A
+S104A
+S01-10-P1
+S11-F1
+S11-OPL1
+S11-T1
+BS11-00_FR
+BS11-01_RA
+BS30-03
+```
+
+Fragmented text can be joined and ranked so complete structural sheet identities win over incomplete prefixes.
+
+---
+
+### Steel section extraction
+
+ShopLens detects and normalizes common structural-steel section labels from positioned PDF text.
+
+Supported families include:
+
+* W shapes
+* HSS
+* channels
+* angles
+* double angles
+* plates
+
+Detected sections retain source information including page and PDF coordinates rather than becoming detached text strings.
+
+---
+
+### Grid-system detection
+
+ShopLens detects structural grid systems from physical drawing evidence.
+
+Grid detection combines:
+
+* positioned grid labels
+* bubble geometry
+* collinear vector segments
+* line continuity
+* perpendicular intersections
+* repeated labels
+* spatial coherence
+
+The detector does not create axes merely because a label resembles a grid name.
+
+Each accepted grid axis retains evidence explaining why it was accepted.
+
+Example:
+
+```text
+VERTICAL | 1 | x=1208.50 | labels=2 | intersections=18 | confidence=0.899
+HORIZONTAL | J | y=-1888.00 | labels=1 | intersections=7 | confidence=0.760
+```
+
+---
+
+### Fragmented-grid recovery
+
+Real structural grids are not always represented by one continuous PDF line.
+
+They may contain:
+
+* dashed lines
+* many short vector fragments
+* interruptions around drawing content
+* nested detail geometry
+* partial line segments
+
+ShopLens can recover label-supported fragmented axes when local geometry and perpendicular-intersection evidence support the reconstruction.
+
+Recovery is deliberately conservative: unsupported geometry is not promoted into a grid axis.
+
+---
+
+### Multiple grid systems
+
+A sheet may contain more than one independent grid region.
+
+ShopLens builds coherent grid candidates before selecting the dominant system and can retain disconnected secondary systems when the geometry supports them.
+
+Systems receive stable identities such as:
+
+```text
+PAGE_27_DOMINANT_GRID
+PAGE_27_SECONDARY_GRID_1
+```
+
+Recovery runs within coherent candidates so one grid system cannot borrow unsupported geometry from another.
+
+Connected offset regions may remain part of one expanded grid when their geometry shows they belong to the same system.
+
+---
+
+### Section localization
+
+Detected structural sections can be localized against the detected grid system.
+
+Every detection receives one exclusive localization status:
+
+```text
+COMPLETE_BAY
+ON_AXIS
+OUTSIDE_GRID
+AMBIGUOUS
+UNLOCALIZED
+```
+
+This gives downstream tools a deterministic answer about where a section occurs without pretending that every drawing condition can be resolved perfectly.
+
+A section localized inside a bay can be associated with the surrounding grid axes.
+
+---
+
+### Evidence and confidence
+
+ShopLens is designed to be inspectable.
+
+Detection results retain evidence such as:
+
+```text
+ALIGNED_GRID_LABEL_BUBBLES
+COLLINEAR_SEGMENTS
+SEGMENT_COVERAGE
+LABEL_REPEATED_AT_OPPOSITE_ENDS
+PERPENDICULAR_INTERSECTIONS
+```
+
+Rejected and unassigned candidates are also retained diagnostically.
+
+The goal is not only to answer:
+
+> What did ShopLens detect?
+
+but also:
+
+> Why did ShopLens detect it?
+
+---
+
+### SVG diagnostics
+
+Grid and localization results can be rendered as SVG overlays for visual inspection.
+
+These are useful when validating:
+
+* accepted grid axes
+* rejected candidates
+* grid-system boundaries
+* section positions
+* bay assignments
+* localization failures
+
+Visual diagnostics are particularly important when developing against drawings from different engineering firms.
+
+---
+
+### JSON output
+
+ShopLens exposes machine-readable output for downstream automation.
+
+Grid output includes structured information for:
+
+* systems
+* axes
+* coordinates
+* labels
+* intersections
+* confidence
+* evidence
+* rejected candidates
+
+Localization output includes both the selected grid hierarchy and a flat grid-system collection for downstream consumers.
+
+---
+
+## Quick Start
+
+### Requirements
+
+* Python 3.9+
+* `pypdf>=6.15,<7`
+* pdf-inspector native bindings for the primary positioned-text and geometry path
+
+Create and activate a virtual environment:
 
 ```bash
-pip install maturin
-maturin develop --release
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-```python
-import pdf_inspector
-
-result = pdf_inspector.process_pdf("document.pdf")
-print(result.pdf_type)   # "text_based", "scanned", "image_based", "mixed"
-print(result.markdown)   # Markdown string or None
-```
-
-> Full API reference: [docs/python.md](docs/python.md)
-
-### Node.js
+Install ShopLens from the repository:
 
 ```bash
-npm install @firecrawl/pdf-inspector
+pip install -e .
 ```
 
-```javascript
-import { readFileSync } from 'fs';
-import { processPdf, classifyPdf } from '@firecrawl/pdf-inspector';
+---
 
-const result = processPdf(readFileSync('document.pdf'));
-console.log(result.pdfType);   // "TextBased", "Scanned", "ImageBased", "Mixed"
-console.log(result.markdown);  // Markdown string or null
-```
+## CLI
 
-> Full API reference: [napi/README.md](napi/README.md)
+ShopLens provides command-line tools for inspecting structural drawing packages and individual sheets.
 
-### Browser WebAssembly
+Start by viewing the available commands:
 
 ```bash
-npm install @firecrawl/pdf-inspector-wasm
+python -m shoplens.cli --help
 ```
 
-```javascript
-import init, { processPdf } from '@firecrawl/pdf-inspector-wasm';
+### Inspect a package
 
-await init();
-const response = await fetch('/document.pdf');
-const pdf = new Uint8Array(await response.arrayBuffer());
-const result = processPdf(pdf);
-
-console.log(result.pdfType);
-console.log(result.markdown);
-```
-
-> Full API reference: [wasm/README.md](wasm/README.md)
-
-### Rust
-
-Install from [crates.io](https://crates.io/crates/pdf-inspector):
+Use the package-level tools to inspect structural PDFs, sheet identities, title blocks, reconciliation, and classification.
 
 ```bash
-cargo add pdf-inspector
+python -m shoplens.cli <command> drawing-set.pdf
 ```
 
-Or add it manually:
+### Inspect a grid system
 
-```toml
-[dependencies]
-pdf-inspector = "0.1"
+Grid extraction can operate against a resolved structural sheet rather than requiring the user to manually determine its physical PDF page.
+
+```bash
+python -m shoplens.cli grid-system drawing-set.pdf --sheet S104A
 ```
 
-```rust
-use pdf_inspector::process_pdf;
+Readable output reports information such as:
 
-let result = process_pdf("document.pdf")?;
-println!("Type: {:?}", result.pdf_type);
-if let Some(markdown) = &result.markdown {
-    println!("{}", markdown);
+```text
+Sheet: S104A
+PDF page: 9
+Grid systems: 1
+Secondary grid systems: 0
+Horizontal grid axes: 6
+Vertical grid axes: 6
+Unassigned grid labels: 5
+Rejected candidates: 14
+```
+
+Use the CLI help for the exact output, JSON, SVG, filtering, and diagnostic options supported by the current checkout:
+
+```bash
+python -m shoplens.cli grid-system --help
+```
+
+---
+
+## Example Grid Result
+
+A detected grid system conceptually contains:
+
+```json
+{
+  "system_id": "PAGE_9_DOMINANT_GRID",
+  "horizontal_axes": [
+    {
+      "label": "A",
+      "coordinate": 752.0,
+      "intersection_count": 6,
+      "confidence": 0.83,
+      "evidence": [
+        "ALIGNED_GRID_LABEL_BUBBLES",
+        "COLLINEAR_SEGMENTS",
+        "PERPENDICULAR_INTERSECTIONS:6"
+      ]
+    }
+  ],
+  "vertical_axes": [],
+  "secondary_grid_systems": []
 }
 ```
 
-> Full API reference: [docs/rust-api.md](docs/rust-api.md)
+The exact schema may contain additional diagnostic fields.
 
-### CLI
+---
 
-```bash
-# Install the CLI tools
-cargo install pdf-inspector
+## Localization Model
 
-# Convert PDF to Markdown
-pdf2md document.pdf
+Grid localization intentionally distinguishes geometrically different outcomes.
 
-# JSON output (for piping)
-pdf2md document.pdf --json
+| Status         | Meaning                                                     |
+| -------------- | ----------------------------------------------------------- |
+| `COMPLETE_BAY` | Detection lies within a resolved grid bay                   |
+| `ON_AXIS`      | Detection lies on or sufficiently near a grid axis          |
+| `OUTSIDE_GRID` | Detection lies outside the selected grid system's extent    |
+| `AMBIGUOUS`    | Available evidence does not support one unique localization |
+| `UNLOCALIZED`  | No supported localization could be produced                 |
 
-# Positioned TextItem JSON, including is_underline metadata
-pdf2md document.pdf --items-json
+These statuses are mutually exclusive.
 
-# Raw markdown only (no headers)
-pdf2md document.pdf --raw
+Additional diagnostic facts may still be reported separately.
 
-# Token-efficient output (collapses long dot leaders and similar source padding)
-pdf2md document.pdf --compact
-
-# Insert page break markers (<!-- Page N -->)
-pdf2md document.pdf --pages
-
-# Process only specific pages
-pdf2md document.pdf --select-pages 1,3,5-10
-
-# Detection only (no extraction)
-detect-pdf document.pdf
-detect-pdf document.pdf --json
-
-# Detection + layout analysis (tables, columns)
-detect-pdf document.pdf --analyze --json
-```
-
-From a source checkout, use `cargo run --bin pdf2md -- document.pdf` or `cargo run --bin detect-pdf -- document.pdf` instead.
+---
 
 ## Architecture
 
-```
-PDF bytes
+```text
+shoplens/
   │
-  ├─► detector         → PdfType (TextBased / Scanned / ImageBased / Mixed)
+  ├── geometry/
+  │     └── PDF geometry adapter and fallback extraction
   │
-  └─► extractor
-        ├─ fonts        → font widths, encodings
-        ├─ content_stream → walk PDF operators → TextItems + PdfRects
-        ├─ xobjects     → Form XObject text, image placeholders
-        ├─ links        → hyperlinks, AcroForm fields
-        └─ layout       → column detection → line grouping → reading order
-              │
-              ├─► tables
-              │     ├─ detect_rects      → rectangle-based tables (union-find)
-              │     ├─ detect_heuristic  → alignment-based tables
-              │     ├─ grid              → column/row assignment → cells
-              │     └─ format            → cells → Markdown table
-              │
-              └─► markdown
-                    ├─ analysis     → font stats, heading tiers
-                    ├─ preprocess   → merge headings, drop caps
-                    ├─ convert      → line loop + table/image insertion
-                    ├─ classify     → captions, lists, code
-                    └─ postprocess  → cleanup → final Markdown
+  ├── grids/
+  │     ├── bubble/label association
+  │     ├── line-component analysis
+  │     ├── axis detection
+  │     ├── coherent-system partitioning
+  │     ├── fragmented-axis recovery
+  │     ├── intersection graph
+  │     ├── models
+  │     └── SVG diagnostics
+  │
+  ├── localization/
+  │     ├── section-to-grid association
+  │     ├── localization models
+  │     └── SVG diagnostics
+  │
+  ├── package / sheet analysis
+  │     ├── sheet-list extraction
+  │     ├── title-block detection
+  │     ├── reconciliation
+  │     └── classification
+  │
+  ├── structural section detection
+  │
+  └── cli.py
 ```
 
-The document is loaded **once** via `load_document_from_path` / `load_document_from_mem` and shared between the detection and extraction stages, so there's no redundant parsing.
+At a high level:
 
-### Project structure
-
-```
-src/
-  lib.rs                — Public API, PdfOptions builder, convenience functions
-  python.rs             — PyO3 Python bindings
-  types.rs              — Shared types: TextItem, TextLine, PdfRect, ItemType
-  text_utils.rs         — Character/text helpers (CJK, RTL, ligatures, bold/italic)
-  process_mode.rs       — ProcessMode enum (DetectOnly, Analyze, Full)
-  detector.rs           — Fast PDF type detection without full document load
-  glyph_names.rs        — Adobe Glyph List → Unicode mapping
-  tounicode.rs          — ToUnicode CMap parsing for CID-encoded text
-  extractor/            — Text extraction pipeline
-  tables/               — Table detection and formatting
-  markdown/             — Markdown conversion and structure detection
-  bin/                  — CLI tools (pdf2md, detect_pdf)
-napi/                   — Node.js/Bun bindings (napi-rs)
-wasm/                   — Browser bindings (wasm-bindgen)
+```text
+pdf-inspector
+     │
+     ▼
+positioned PDF evidence
+     │
+     ▼
+ShopLens structural interpretation
+     │
+     ▼
+typed + explainable drawing data
 ```
 
-## How classification works
+---
 
-1. Parse the xref table and page tree (no full object load)
-2. Select pages based on `ScanStrategy` (default: all pages with early exit)
-3. Look for `Tj`/`TJ` (text operators) and `Do` (image operators) in content streams
-4. Classify based on text operator presence across sampled pages
+## pdf-inspector
 
-This detects 300+ page PDFs in milliseconds. The result includes `pages_needing_ocr` — a list of specific page numbers that lack text, enabling per-page OCR routing instead of all-or-nothing.
+ShopLens builds on [pdf-inspector](https://github.com/firecrawl/pdf-inspector) for native PDF inspection.
 
-### Scan strategies
+pdf-inspector provides fast local PDF classification and positioned text extraction. ShopLens adds a separate structural-drawing interpretation layer on top of that information.
 
-| Strategy | Behavior | Best for |
-|---|---|---|
-| `EarlyExit` (default) | Scan all pages, stop on first non-text page | Pipelines routing TextBased PDFs to fast extraction |
-| `Full` | Scan all pages, no early exit | Accurate Mixed vs Scanned classification |
-| `Sample(n)` | Sample `n` evenly distributed pages (first, last, middle) | Very large PDFs where speed matters more than precision |
-| `Pages(vec)` | Only scan specific 1-indexed page numbers | When the caller knows which pages to check |
+The upstream parser, attribution, and license are preserved.
 
-## Markdown output
+ShopLens also contains a `pypdf` fallback for required geometry extraction when the local native extension does not expose the necessary geometry binding.
 
-The converter handles:
+The supported fallback dependency is:
 
-| Element | How it's detected |
-|---|---|
-| Headings (H1-H4) | Font size tiers relative to body text, with 0.5pt clustering |
-| Bold/italic | Font name patterns (Bold, Italic, Oblique) |
-| Bullet lists | `*`, `-`, `*`, `○`, `●`, `◦` prefixes |
-| Numbered lists | `1.`, `1)`, `(1)` patterns |
-| Letter lists | `a.`, `a)`, `(a)` patterns |
-| Code blocks | Monospace fonts (Courier, Consolas, Monaco, Menlo, Fira Code, JetBrains Mono) and keyword detection |
-| Tables | Rectangle-based detection from PDF drawing ops + heuristic detection from text alignment |
-| Financial tables | Token splitting for consolidated numeric values |
-| Captions | "Figure", "Table", "Source:" prefix detection |
-| Sub/superscript | Font size and Y-offset relative to baseline |
-| URLs | Converted to Markdown links |
-| Hyphenation | Rejoins words broken across lines |
-| Page numbers | Filtered from output |
-| Drop caps | Large initial letters merged with following text |
-| Dot leaders | TOC-style dots collapsed to " ... " |
-
-## Use case: smart PDF routing
-
-pdf-inspector was built for pipelines that process PDFs at scale. Instead of sending every PDF through OCR:
-
-```
-PDF arrives
-  → pdf-inspector classifies it (~20ms)
-  → TextBased + high confidence?
-      YES → extract locally (~150ms), done
-      NO  → send to OCR service (2-10s)
+```text
+pypdf>=6.15,<7
 ```
 
-This saves cost and latency for the majority of PDFs that are already text-based (reports, papers, invoices, legal docs).
+---
 
-## Debugging
+## Design Principles
 
-See [docs/debugging.md](docs/debugging.md) for `RUST_LOG` environment variable usage.
+### Evidence over guessing
+
+A text string that looks like a grid label is not enough.
+
+ShopLens prefers multiple physical signals before promoting drawing information into structured data.
+
+### Preserve uncertainty
+
+Ambiguous or unsupported observations remain ambiguous or unassigned.
+
+ShopLens should not fabricate a clean drawing model from incomplete evidence.
+
+### Cross-firm behavior
+
+The detector is developed against structural drawings from multiple sources and drawing conventions rather than tuning exclusively to one engineer's graphics.
+
+### Deterministic first
+
+Current interpretation is rule- and geometry-based.
+
+AI is not used to silently repair uncertain structural information.
+
+### Diagnostics are part of the product
+
+Rejected candidates, evidence, confidence, SVGs, and validation reports are treated as first-class development tools.
+
+---
+
+## Validation
+
+ShopLens includes both unit-level regression tests and real structural drawing acceptance checks.
+
+The unit suite covers cases including:
+
+* structural section syntax
+* sheet-number reconstruction
+* duplicate grid bubbles
+* multiple bubble-size families
+* decorative circles
+* detail/section reference rejection
+* decimal grid labels
+* repeated grid labels
+* disconnected grid systems
+* side-by-side grids
+* stacked grids
+* dashed grids
+* fragmented axes
+* short detail-stroke bridges
+* secondary-system recovery
+* fixed-point axis recovery
+* symmetric intersection metadata
+* localization status accounting
+* flat versus hierarchical serialization
+
+Real-PDF validation is used to protect behavior across multiple structural drawing packages and engineering conventions.
+
+The repository also includes a package validation suite covering:
+
+```text
+PDF_HEALTH
+SHEET_LIST
+TITLE_BLOCKS
+SHEET_RECONCILIATION
+PACKAGE_CLASSIFICATION
+```
+
+Validation is designed around regression evidence rather than assuming that a higher raw detection count is automatically better.
+
+---
+
+## Why Structural PDFs Are Difficult
+
+PDFs do not contain a structural model.
+
+What visually appears to be:
+
+```text
+      1        2        3
+      │        │        │
+A ────┼────────┼────────┼────
+      │        │        │
+B ────┼────────┼────────┼────
+```
+
+may internally be represented as:
+
+* separate text objects
+* dozens or hundreds of line fragments
+* reused drawing symbols
+* Form XObjects
+* clipped geometry
+* duplicated circles
+* unrelated detail references
+* text in a different coordinate convention
+
+ShopLens reconstructs structural meaning from that evidence while attempting to preserve the distinction between what the PDF actually proves and what merely looks plausible.
+
+---
+
+## Current Limitations
+
+ShopLens is under active development.
+
+Current limitations include:
+
+* Native-text/vector PDFs are the primary target.
+* ShopLens does not currently use OCR to recover scanned structural drawings.
+* Grid recovery requires an already coherent candidate system; it does not invent wholly unsupported grids.
+* Shared-axis and offset regions may remain one connected system when geometry does not support a clean independent partition.
+* Some structural drawing conventions may require additional grammar or geometric evidence.
+* PDF internals such as Form XObjects can require fallback geometry extraction.
+* Detection confidence represents evidence quality, not engineering-design certainty.
+* ShopLens interprets drawing information; it does not replace structural engineering review.
+
+---
+
+## What ShopLens Is Not
+
+ShopLens is **not** currently:
+
+* a structural analysis engine
+* a code-checking engine
+* a connection-design program
+* an OCR system
+* a Revit or BIM model generator
+* a drawing-comparison engine
+* an AI system that guesses missing engineering information
+
+Those capabilities should not be inferred from the current extraction and localization pipeline.
+
+---
+
+## Roadmap
+
+The current foundation makes higher-level structural drawing intelligence possible.
+
+Potential future milestones include:
+
+```text
+PDF understanding
+      ↓
+sheet identity
+      ↓
+structural sections
+      ↓
+grid systems
+      ↓
+section localization
+      ↓
+member understanding
+      ↓
+drawing relationships
+      ↓
+cross-sheet structural context
+```
+
+Each layer should remain evidence-backed and independently testable.
+
+---
+
+## Development
+
+Run the unit suite:
+
+```bash
+python -m pytest tests/unit -q
+```
+
+Compile-check the Python package:
+
+```bash
+python -m compileall shoplens
+```
+
+Check the working diff for whitespace errors:
+
+```bash
+git diff --check
+```
+
+Before merging geometry-sensitive changes, run the repository's real-PDF acceptance and validation workflow appropriate to the affected subsystem.
+
+---
+
+## Security
+
+ShopLens processes complex PDF input and should be kept current with supported parser dependencies.
+
+The current `pypdf` fallback requires:
+
+```text
+pypdf>=6.15,<7
+```
+
+Applications accepting untrusted PDFs should keep ShopLens and its PDF-processing dependencies updated.
+
+---
+
+## Contributing
+
+ShopLens is evolving toward a reusable structural drawing intelligence layer.
+
+When contributing:
+
+1. Reproduce the problem before changing detection logic.
+2. Identify the smallest root cause.
+3. Add a focused regression test.
+4. Preserve existing cross-firm acceptance cases.
+5. Prefer physical drawing evidence over filename- or project-specific heuristics.
+6. Do not fabricate structural information to improve headline detection counts.
+7. Run the relevant unit and real-PDF validation before merging.
+
+---
 
 ## License
 
-[MIT](LICENSE)
+See [LICENSE](LICENSE) for repository licensing information.
+
+ShopLens builds on Firecrawl's `pdf-inspector`; upstream attribution and licensing are preserved.
