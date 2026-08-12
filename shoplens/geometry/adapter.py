@@ -74,7 +74,7 @@ def _extract_with_pypdf(
         from pypdf.generic import ContentStream
     except ImportError as exc:
         raise RuntimeError(
-            "Grid geometry requires a rebuilt pdf-inspector geometry binding or pypdf>=5,<6."
+            "Grid geometry requires a rebuilt pdf-inspector geometry binding or pypdf>=6.15,<7."
         ) from exc
 
     reader = PdfReader(str(path))

@@ -526,7 +526,7 @@ provider. The checked-in Rust parser already tracks the current transformation
 matrix and internally extracts stroked `m`/`l` line segments and `re`
 rectangles in the same space as positioned text. This branch adds an additive
 geometry binding for that existing information. Until a local native extension
-is rebuilt with the binding, the adapter falls back to `pypdf>=5,<6`, a
+is rebuilt with the binding, the adapter falls back to `pypdf>=6.15,<7`, a
 pure-Python library under the permissive BSD-3-Clause license. No PyMuPDF or
 copyleft runtime dependency was added. The fallback is necessary only because
 the previously published Python API exposes positioned text but not page boxes
