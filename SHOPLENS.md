@@ -1,197 +1,228 @@
-# ShopLens steel-section extraction and diagnostics
+ShopLens
 
-ShopLens builds on Firecrawl's open-source `pdf-inspector` and keeps its
-construction-specific code in the separate `shoplens/` Python package. The
-original attribution and MIT license remain unchanged.
+ShopLens is a structural-drawing intelligence layer built on top of Firecrawl's open-source pdf-inspector.
 
-## What it does
+It extracts and organizes structural information from native-text/vector PDF drawing sets using deterministic rules, positioned text, and vector geometry. The original pdf-inspector attribution and MIT license remain unchanged.
 
-ShopLens reads a local native-text PDF, uses `pdf-inspector` to extract
-positioned text, and detects common W-shapes, HSS, channels, angles, double
-angles, and plates. Formatting variants such as `W18 x 35` and `W18×35` are
-normalized to `W18X35`.
+What ShopLens does
 
-Each result contains the original matched text, normalized value, section
-family, 1-based PDF page number, bounding box (`x`, `y`, `width`, `height` in
-PDF points), and confidence. Coordinates use the PDF convention: the origin is
-at the bottom-left of the page.
+ShopLens currently supports:
 
-It also provides extraction diagnostics, duplicate-aware summaries, filters,
-and installation checks. It does **not** compare drawings, perform OCR,
-recognize grids or beam lines,
-join labels split across text items, or use AI/external services.
+structural steel section-label extraction and normalization
 
-## Repository and parser API
+declared Sheet List extraction
 
-The upstream project is organized as a Rust crate in `src/`, with extraction in
-`src/extractor/`, table handling in `src/tables/`, Markdown conversion in
-`src/markdown/`, command-line binaries in `src/bin/`, and Rust integration tests
-and PDF fixtures in `tests/`. Its PyO3 bindings live in `src/python.rs`; the
-package metadata is in `pyproject.toml`, and `pdf_inspector.pyi`,
-`docs/python.md`, `examples/basic_usage.py`, and `tests/test_python.py` document
-and exercise the public Python interface.
+title-block discovery and reconciliation
 
-ShopLens calls the public function below directly:
+package-level sheet classification and indexing
 
-```python
+classified section-label inventories
+
+structural grid-system detection
+
+grid-relative section localization
+
+neutral member-line candidate detection
+
+repetitive linear-pattern clustering
+
+package-level validation and regression reporting
+
+JSON, CSV, debug, and SVG diagnostic output
+
+ShopLens is intentionally conservative. It preserves uncertainty, exposes evidence and warnings, and avoids converting ambiguous drawing content into asserted engineering meaning.
+
+It does not currently:
+
+perform OCR
+
+infer missing engineering information
+
+associate section labels with specific physical members
+
+compare design drawings with shop drawings
+
+perform structural analysis or design checks
+
+replace engineering review
+
+Repository and parser API
+
+The upstream parser is organized as a Rust crate in src/, with extraction in
+src/extractor/, table handling in src/tables/, Markdown conversion in
+src/markdown/, command-line binaries in src/bin/, and Rust integration tests
+in tests/.
+
+Its PyO3 bindings live in src/python.rs. ShopLens-specific Python code lives in
+the separate shoplens/ package.
+
+ShopLens uses positioned extraction through the public pdf-inspector API:
+
 items = pdf_inspector.extract_text_with_positions("drawing.pdf")
-```
 
-It returns `pdf_inspector.TextItem` objects. Each exposes `text`, `x`, `y`,
-`width`, `height`, `font`, `font_size`, `page`, style flags, and `item_type`.
-The source `page` value is already 1-based; ShopLens preserves it as the
-human-readable page number. `x` and `y` are raw PDF points measured from the
-bottom-left. The same API also has a bytes variant and an optional page filter.
-Other public functions return plain text, Markdown, document classification, or
-text within caller-supplied regions, but positioned extraction is the correct
-API for this milestone.
+Returned positioned-text records expose text, coordinates, dimensions, font
+metadata, page information, style flags, and item type.
 
-The Rust project currently builds and tests with `cargo fmt`,
-`cargo clippy -- -D warnings`, `cargo test`, and `cargo build --release`.
-Python bindings are built and installed into the active environment by Maturin
-and are tested with Pytest.
+ShopLens uses a public one-based page convention in its own CLI and models.
 
-## macOS setup
+Requirements
 
-From Terminal, change into this repository and create a Python virtual
-environment. A virtual environment keeps this project's Python tools separate
-from the rest of your Mac.
+Python 3.9+
 
-```bash
+pypdf>=6.15,<7
+
+a locally installed pdf-inspector Python extension for the native parser path
+
+The Rust extension currently retains abi3-py38 compatibility independently of
+the Python package's supported minimum version.
+
+macOS setup
+
+From Terminal:
+
 cd /path/to/shoplens
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install maturin pytest
 python -m maturin develop --release
-```
 
-The final command compiles the Rust `pdf-inspector` extension and installs it
-into the active virtual environment. ShopLens imports that extension directly;
-the Rust parser is not copied or rewritten.
+The final command builds the local Rust extension and installs it into the active
+virtual environment.
 
-## Check the installation
+Check the installation
 
-```bash
 python -m shoplens.cli doctor
 python -m shoplens.cli doctor drawing.pdf
-```
 
-The first command checks Python, both imports, the native module location, and
-the positioned-text function. Supplying a PDF also checks that the path exists,
-that `pdf-inspector` can open it, and that positioned text is returned. Cargo is
-not required when a working Python extension is already installed.
+The first command checks the Python environment, imports, native module location,
+and positioned-text API.
 
-## Inspect steel labels
+Supplying a PDF also checks that the file can be opened and that positioned text
+can be returned.
 
-The default output is a summary so a large drawing does not flood Terminal:
+Steel-section extraction
 
-```bash
+ShopLens detects common structural-steel section labels from positioned PDF text.
+
+Supported families include:
+
+W-shapes
+
+HSS
+
+channels
+
+angles
+
+double angles
+
+plates
+
+Formatting variants are normalized to stable values.
+
+Example:
+
+W18 x 35
+W18×35
+W18X35
+
+All normalize to:
+
+W18X35
+
+Each detection retains:
+
+original text
+
+normalized value
+
+section family
+
+one-based PDF page
+
+bounding box
+
+confidence
+
+duplicate information
+
+Coordinates remain in PDF user space.
+
+Inspect steel labels
+
 python -m shoplens.cli inspect drawing.pdf
-```
-
-Add `--list` to print individual deduplicated records:
-
-```bash
 python -m shoplens.cli inspect drawing.pdf --list
 python -m shoplens.cli inspect drawing.pdf --raw --list
-```
 
-`--raw` selects every accepted source detection, including duplicate PDF text
-objects. Without `--raw`, records are deduplicated only when page, normalized
-section, coordinates, width, and height match within 0.25 PDF points. A retained
-record reports `duplicate_count`. Two `W24X62` labels at different drawing
-locations remain distinct.
+JSON:
 
-Summary JSON clearly identifies `record_mode` as `raw` or `deduplicated`:
-
-```bash
 python -m shoplens.cli inspect drawing.pdf --json
 python -m shoplens.cli inspect drawing.pdf --json --list
-```
 
-The summary includes raw/displayed totals, unique values, counts by family and
-page, pages containing detections, the ten most frequent values, duplicates,
-negative coordinates, and rejected likely false positives. Filters work with
-readable and JSON output and can be combined:
+Filters may be combined:
 
-```bash
-python -m shoplens.cli inspect drawing.pdf --page 39 --family W --contains W18
-```
+python -m shoplens.cli inspect drawing.pdf \
+  --page <PDF_PAGE> \
+  --family W \
+  --contains W18
 
-## Diagnose extracted text
+Positioned-text diagnostics
 
-`debug-text` displays every source positioned-text item, including its source
-page, human-readable page, text, raw box, font metadata, candidate/match flags,
-accepted section data, and practical rejection reasons.
+debug-text displays source positioned-text items and their extraction metadata.
 
-```bash
 python -m shoplens.cli debug-text drawing.pdf
 python -m shoplens.cli debug-text drawing.pdf --json
-python -m shoplens.cli debug-text drawing.pdf --page 39
+python -m shoplens.cli debug-text drawing.pdf --page <PDF_PAGE>
 python -m shoplens.cli debug-text drawing.pdf --contains W18
 python -m shoplens.cli debug-text drawing.pdf --family HSS --matches-only
 python -m shoplens.cli debug-text drawing.pdf --candidates-only
-```
 
-Family options may be repeated. `--page` always means the visible one-based PDF
-page number.
+--page uses ShopLens' public one-based PDF-page convention.
 
-## Extract a declared Sheet List
+Declared Sheet List extraction
 
-ShopLens can build a structured index from a native-text `SHEET LIST`,
-`DRAWING LIST`, `INDEX OF DRAWINGS`, or `SHEET INDEX` table. This is the
-architect's or engineer's declared index. The title-block commands described
-below compare that declared index with the identity printed on each actual page.
+ShopLens can build a structured declared index from native-text tables such as:
 
-By default, only PDF pages 1–5 are parsed because drawing indexes are normally
-near the front of a package and large packages can contain hundreds of pages.
-Page ranges are human-readable and one-based:
+SHEET LIST
 
-```bash
+DRAWING LIST
+
+INDEX OF DRAWINGS
+
+SHEET INDEX
+
+By default, the first few pages are inspected because drawing indexes commonly
+appear near the front of a package.
+
 python -m shoplens.cli sheet-list drawing.pdf
 python -m shoplens.cli sheet-list drawing.pdf --pages 1-5
-python -m shoplens.cli sheet-list drawing.pdf --pages 2-8
-```
-
-The normal output is a concise summary. Add `--list` for declared rows, use
-`--json` for every model field and raw bounding-box coordinate, or use `--debug`
-to see heading candidates, header candidates, inferred column boundaries, row
-Y positions, and rejected-row reasons:
-
-```bash
 python -m shoplens.cli sheet-list drawing.pdf --list
 python -m shoplens.cli sheet-list drawing.pdf --json
 python -m shoplens.cli sheet-list drawing.pdf --debug
-python -m shoplens.cli sheet-list drawing.pdf --json --debug
-```
+
+Column locations are inferred from table headers instead of hard-coded page
+coordinates.
 
 Example readable output:
 
-```text
-Sheet List found on PDF page(s): 3
-92 sheet entries extracted
+Sheet List found on PDF page(s): <PAGE>
+<COUNT> sheet entries extracted
 
-Prefix summary:
-S0: 10
-S1: 35
+<SHEET_ID> | <SHEET_TITLE> | source page <PAGE>
 
-S1-20A | SECOND FLOOR FRAMING PLAN - SEGMENT A | source page 3
-```
+Example JSON shape:
 
-The JSON result has this overall shape:
-
-```json
 {
   "source_file": "drawing.pdf",
   "pages_scanned": [1, 2, 3, 4, 5],
-  "sheet_list_pages": [3],
+  "sheet_list_pages": ["<PAGE>"],
   "entries": [
     {
-      "sheet_number": "S1-20A",
-      "sheet_name": "SECOND FLOOR FRAMING PLAN - SEGMENT A",
-      "source_page": 3,
-      "number_original_text": "S1-20A",
-      "name_original_text": "SECOND FLOOR FRAMING PLAN - SEGMENT A",
+      "sheet_number": "<SHEET_ID>",
+      "sheet_name": "<SHEET_TITLE>",
+      "source_page": "<PAGE>",
+      "number_original_text": "<SOURCE_TEXT>",
+      "name_original_text": "<SOURCE_TITLE_TEXT>",
       "number_x": 100.0,
       "number_y": 700.0,
       "number_width": 60.0,
@@ -201,571 +232,646 @@ The JSON result has this overall shape:
       "name_width": 280.0,
       "name_height": 10.0,
       "confidence": 0.95,
-      "warnings": [],
-      "name_comparison_text": "SECOND FLOOR FRAMING PLAN-SEGMENT A"
+      "warnings": []
     }
   ],
   "duplicate_sheet_numbers": [],
-  "warnings": [],
-  "declared_total": 92
+  "warnings": []
 }
-```
 
-Supported number styles include `S0-00`, `S1-20A`, `S-101`, `S101A`,
-`SK-01`, and `SSK-001`. The configurable syntax requires an alphabetic prefix
-and digits; it intentionally excludes ordinary prose, dimensions, and totals.
-
-Column locations come from the `SHEET NUMBER`/`SHEET NAME` headers rather than
-fixed page coordinates. A confirmed list may continue onto the next selected
-page with repeated headers or with rows using the prior page's column layout.
-An unrelated two-column schedule is not treated as a continuation unless it
-immediately follows a confirmed list page and contains valid sheet rows.
+Supported sheet-number syntax is deliberately broad enough for multiple
+structural-document conventions while remaining conservative enough to avoid
+ordinary prose, dimensions, and totals.
 
 Exact overlapping PDF text objects and exact duplicate rows are suppressed and
-reported. Repeated sheet numbers at different locations remain in the result.
-Identical titles receive `DUPLICATE_SHEET_NUMBER`; differing titles receive
-`CONFLICTING_SHEET_TITLES`. Missing names, invalid row candidates, suspiciously
-small results, missing column headers, and footer rows are also diagnosed.
-When a `Grand total` footer is present, JSON exposes it as `declared_total` and
-ShopLens reports `DECLARED_TOTAL_MISMATCH` if it differs from the unique entry
-count. Invalid-row details remain in `--debug`; normal output uses an aggregated
-warning count.
+reported.
 
-## Extract and reconcile title blocks
+Title-block extraction and reconciliation
 
-Title-block extraction finds likely sheet numbers, scores their label context,
-declared-list support, font prominence, and nearby title text, then discovers
-repeated coordinate clusters within the package. A cluster must be supported by
-at least two pages; its signed raw coordinates are compared with a 60-point
-tolerance. More than one standard or rotated layout can be discovered. Coordinates
-are never converted with `abs()` or tied to an assumed lower-right page corner.
+Title-block extraction identifies likely sheet numbers and titles using evidence
+such as:
 
-Layout evidence supports labeled fields (`SHEET`, `SHEET NO.`, `DRAWING NO.`,
-`DWG NO.`, and `DOCUMENT NO.`), repeated unlabeled number regions, and standard
-or rotated fields. Sheet-number profiles include compact structural identifiers,
-hyphenated forms, and context-supported coded document numbers. Spatially adjacent,
-font-compatible number fragments may be joined only when the combined value matches
-a supported profile; JSON preserves the source fragments separately. Explicit
-`Title` fields take priority, while repeated nearby multi-line title regions support
-layouts without a title label.
+label context
 
-The declared Sheet List is useful supporting evidence, but it is not treated as
-truth by itself. Small references, Sheet List rows, and frequently repeated project
-identifiers are rejected unless independent title-block label and recurring-layout
-evidence establishes the context. Ambiguous candidates remain unidentified and
-receive a low-confidence warning. Revision is blank unless an explicit nearby
-`REV` or `REVISION` field supplies a clear value.
+declared-list support
 
-When a page is itself a declared `SHEET INDEX`/`SHEET LIST`, ShopLens can report
-its identity without pretending that the table is a conventional title block.
-Such a record uses `identity_source=DECLARED_SHEET_LIST`,
-`title_block_status=NOT_PRESENT`, and `page_role=SHEET_INDEX`; its title-block
-coordinates remain blank. Validation reports these intentional non-title-block
-pages separately from genuinely unidentified pages. A textless residual page is
-reconstructed from the declared list only when that list is complete and it
-leaves exactly one declared identity and one textless PDF page.
+font prominence
 
-On macOS, run these commands from the repository directory:
+nearby title text
 
-```bash
-python -m shoplens.cli title-blocks \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --list
-python -m shoplens.cli title-blocks \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --page 27
-python -m shoplens.cli title-blocks \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --json
-python -m shoplens.cli title-blocks \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --debug
+repeated coordinate regions
 
-python -m shoplens.cli reconcile-sheets \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --list
-python -m shoplens.cli reconcile-sheets \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --json
-```
+standard and rotated layouts
 
-`--page` filters displayed title-block records only after layouts are discovered
-from the complete package. The reader uses short-lived, bounded extraction workers
-to keep large native-text drawing sets within predictable memory. `--debug` exposes
-all candidate scores and reasons, rejections, selected title fragments, confidence,
-and discovered layout clusters; normal output remains concise.
+recurring unlabeled title-block regions
 
-Reconciliation uses these statuses:
+spatially compatible split fragments
 
-- `MATCH`: number and normalized title agree.
-- `TITLE_VARIATION`: number agrees and only harmless punctuation, spacing,
-  hyphenation, or a supported abbreviation differs.
-- `TITLE_MISMATCH`: number agrees but the titles differ meaningfully.
-- `DECLARED_BUT_MISSING`: a declared number has no identified actual page.
-- `PRESENT_BUT_UNDECLARED`: an identified actual number is absent from the list.
-- `DUPLICATE_SHEET_NUMBER`: one actual number appears on multiple PDF pages.
-- `UNIDENTIFIED_PAGE`: no reliable candidate exists.
-- `LOW_CONFIDENCE`: a candidate or title exists but evidence is insufficient.
-- `TITLE_BLOCK_ONLY_INDEX`: an actual title block is indexed without claiming it
-  was declared by a Sheet List.
+Supported labels include forms such as:
 
-`declared_index_status` distinguishes `AVAILABLE`,
-`PARTIAL_DECLARED_SHEET_LIST`, and `NO_DECLARED_SHEET_LIST`. When there is no
-usable declared index, reconciliation is not applicable, but identified actual
-title blocks are still classified. A partial list preserves declared matches and
-adds other confident actual sheets as `TITLE_BLOCK_ONLY` records instead of
-assuming they are errors.
+SHEET
+SHEET NO.
+SHEET NUMBER
+DRAWING NO.
+DWG NO.
+DOCUMENT NO.
 
-Title comparison uppercases text, collapses whitespace, normalizes hyphen spacing,
-and compares a small explicit abbreviation vocabulary. The JSON
-`title_similarity` value is Python's deterministic character-sequence ratio after
-strict normalization; status does not rely on an LLM or semantic embedding.
+ShopLens can learn more than one title-block layout within the same package.
 
-Example title-block JSON fields:
+Run:
 
-```json
+python -m shoplens.cli title-blocks drawing.pdf --list
+python -m shoplens.cli title-blocks drawing.pdf --page <PDF_PAGE>
+python -m shoplens.cli title-blocks drawing.pdf --json
+python -m shoplens.cli title-blocks drawing.pdf --debug
+
+Reconcile declared and actual identities:
+
+python -m shoplens.cli reconcile-sheets drawing.pdf --list
+python -m shoplens.cli reconcile-sheets drawing.pdf --json
+
+--page filters displayed records after package-level layout discovery.
+
+Reconciliation statuses
+
+MATCH
+
+TITLE_VARIATION
+
+TITLE_MISMATCH
+
+DECLARED_BUT_MISSING
+
+PRESENT_BUT_UNDECLARED
+
+DUPLICATE_SHEET_NUMBER
+
+UNIDENTIFIED_PAGE
+
+LOW_CONFIDENCE
+
+TITLE_BLOCK_ONLY_INDEX
+
+Declared-index status can distinguish:
+
+AVAILABLE
+
+PARTIAL_DECLARED_SHEET_LIST
+
+NO_DECLARED_SHEET_LIST
+
+A package without a usable Sheet List can still retain and classify confident
+title-block-only records.
+
+Example title-block JSON:
+
 {
-  "pdf_page": 27,
-  "sheet_number": "S1-20A",
-  "sheet_title": "SECOND FLOOR FRAMING PLAN - SEGMENT A",
+  "pdf_page": "<PDF_PAGE>",
+  "sheet_number": "<SHEET_ID>",
+  "sheet_title": "<SHEET_TITLE>",
   "revision": null,
   "confidence": 1.0,
   "layout_id": "layout-1",
-  "number_x": 2839.68,
-  "number_y": -2138.76,
+  "number_x": 100.0,
+  "number_y": 200.0,
   "warnings": []
 }
-```
 
-Example reconciliation record:
+Example reconciliation JSON:
 
-```json
 {
-  "declared_sheet_number": "S1-20A",
-  "actual_pdf_pages": [27],
-  "actual_sheet_number": "S1-20A",
+  "declared_sheet_number": "<SHEET_ID>",
+  "actual_pdf_pages": ["<PDF_PAGE>"],
+  "actual_sheet_number": "<SHEET_ID>",
   "status": "MATCH",
   "title_similarity": 1.0,
   "confidence": 1.0,
   "warnings": []
 }
-```
 
-## Classify and index structural sheets
+Structural sheet classification
 
-`package-index` adds deterministic searchable metadata to reconciled sheets. It
-never replaces the sheet number, PDF page, declared title, or actual title. The
-actual title is preferred for classification; the declared title is a fallback,
-and a missing source remains `UNKNOWN` with a warning.
+package-index adds deterministic searchable metadata to indexed structural
+sheets.
 
-The initial kind taxonomy is `GENERAL`, `NOTES`, `PLAN`, `ELEVATION`, `DETAIL`,
-`SECTION`, `SCHEDULE`, `DIAGRAM`, `VIEW`, `COVER`, and `UNKNOWN`. Explicit
-drawing-view forms such as `3D VIEW`, `ISOMETRIC VIEW`, `AXONOMETRIC VIEW`, and
-`PERSPECTIVE VIEW` use `VIEW`; a bare `VIEW` or a similar word such as `VIEWING`
-does not. The structural subject
-taxonomy covers general notes, loading, foundation plans/details, floor/roof/
-platform/stair framing, braced frames, wind bracing, connections, steel framing,
-steel columns, base plates, shear connections, platforms, stairs, other structural
-content, and unknown content. Mixed sheets keep one primary kind/subject plus
-secondary values; for example, sections-and-details uses `DETAIL` with secondary
-kind `SECTION`.
+It preserves original identifiers and titles while adding classification fields.
 
-Rules are declarative and deterministic. Exact or highly specific title patterns
-run before broader patterns, so `FOUNDATION PLAN` wins over generic foundation
-content and roof-framing details retain their roof subject. Equally specific rules
-with different assignments produce `MULTIPLE_PRIMARY_RULES` rather than relying on
-declaration order. Confidence is rule strength, not a statistical probability:
-approximately 0.98 is highly specific, 0.90–0.95 is strong, 0.80 is a broad safe
-fallback, below 0.70 is warned, and 0.00 is unknown.
+The initial kind taxonomy includes:
 
-Levels are extracted only for explicit vertical context such as `FOUNDATION`,
-`SECOND FLOOR`, or `ROOF`. Named zones such as `MECHANICAL PLATFORM`, `OFFICE
-ROOF`, stair towers, and `SERVICE YARD` are areas. Segments come from `SEGMENT X`
-in the title; a matching sheet-number suffix is supporting evidence only, and a
-different suffix produces `SEGMENT_CONFLICT`. Controlled modifiers currently
-include `TYPICAL`, `OVERALL`, `ENLARGED`, and `PARTIAL`.
+GENERAL
+NOTES
+PLAN
+ELEVATION
+DETAIL
+SECTION
+SCHEDULE
+DIAGRAM
+VIEW
+COVER
+UNKNOWN
 
-Stable group keys combine useful metadata without replacing it, for example
-`FOUNDATION_PLAN:SEGMENT_A`, `FLOOR_FRAMING:SECOND_FLOOR:SEGMENT_A`,
-`CONNECTION:DOUBLE_ANGLE`, and `PLATFORM:DETAIL`.
+Structural subjects cover categories such as:
 
-Run the real package on macOS from the repository directory:
+general notes
 
-```bash
-python -m shoplens.cli package-index \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf"
-python -m shoplens.cli package-index \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --list
-python -m shoplens.cli package-index \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --json > /tmp/shoplens-package-index.json
-```
+loading
 
-Filters apply to both readable and JSON records:
+foundations
 
-```bash
-python -m shoplens.cli package-index drawing.pdf --sheet S1-20A --debug
-python -m shoplens.cli package-index drawing.pdf --page 27
+floor framing
+
+roof framing
+
+platform framing
+
+stair framing
+
+braced frames
+
+wind bracing
+
+connections
+
+steel framing
+
+steel columns
+
+base plates
+
+shear connections
+
+platforms
+
+stairs
+
+other structural content
+
+unknown content
+
+Rules are deterministic and declarative.
+
+Run:
+
+python -m shoplens.cli package-index drawing.pdf
+python -m shoplens.cli package-index drawing.pdf --list
+python -m shoplens.cli package-index drawing.pdf --json
+
+Example filters:
+
+python -m shoplens.cli package-index drawing.pdf --sheet <SHEET_ID> --debug
+python -m shoplens.cli package-index drawing.pdf --page <PDF_PAGE>
 python -m shoplens.cli package-index drawing.pdf --kind PLAN
 python -m shoplens.cli package-index drawing.pdf --subject FOUNDATION_PLAN
-python -m shoplens.cli package-index drawing.pdf --level "SECOND FLOOR"
-python -m shoplens.cli package-index drawing.pdf --segment A
-python -m shoplens.cli package-index drawing.pdf --area "MECHANICAL PLATFORM"
+python -m shoplens.cli package-index drawing.pdf --level "<LEVEL>"
+python -m shoplens.cli package-index drawing.pdf --segment <SEGMENT>
+python -m shoplens.cli package-index drawing.pdf --area "<AREA>"
 python -m shoplens.cli package-index drawing.pdf --unknown-only --list
-```
 
-JSON preserves both original titles and includes stable enum values, rule ID,
-confidence, evidence, warnings, secondary taxonomy, group keys, package counts,
-and `classification_version`:
+Example JSON:
 
-```json
 {
-  "pdf_page": 27,
-  "sheet_number": "S1-20A",
-  "declared_title": "SECOND FLOOR FRAMING PLAN - SEGMENT A",
-  "actual_title": "SECOND FLOOR FRAMING PLAN - SEGMENT A",
+  "pdf_page": "<PDF_PAGE>",
+  "sheet_number": "<SHEET_ID>",
+  "declared_title": "<DECLARED_TITLE>",
+  "actual_title": "<ACTUAL_TITLE>",
   "sheet_kind": "PLAN",
   "subject": "FLOOR_FRAMING",
-  "level": "SECOND FLOOR",
-  "segment": "A",
+  "level": "<LEVEL>",
+  "segment": "<SEGMENT>",
   "classification_confidence": 0.98,
-  "matched_rule": "SECOND_FLOOR_FRAMING_PLAN",
+  "matched_rule": "<RULE_ID>",
   "warnings": []
 }
-```
 
-For example, `OVERALL 3D VIEW` classifies as kind `VIEW`, subject
-`OTHER_STRUCTURAL`, modifier `OVERALL`, using the stable `DRAWING_VIEW` rule.
+Classified section inventory
 
-To add a safe rule, place a narrowly worded pattern in
-`shoplens/classification/rules.py`, give it a stable ID and a higher priority than
-any broader fallback it supersedes, then add synthetic positive, negative, and
-ambiguity tests. Do not add a rule solely to eliminate an unknown count.
+section-inventory joins accepted steel-section labels to indexed sheets using
+the physical PDF page.
 
-## Build a classified section-label inventory
+It does not infer physical members. Repeated section labels remain annotation
+detections rather than beam, column, or piece quantities.
 
-`section-inventory` joins accepted steel-section labels to classified sheets using
-the one-based PDF page number. It does not infer physical members: repeated
-`W18X35` records are label detections and may be distinct annotations, schedules,
-references, or duplicated PDF text. No count produced here is a beam or column
-quantity.
-
-The command builds the package index once, extracts positioned text in isolated
-three-page batches, and reuses those lightweight records for title blocks and steel
-detection. It does not parse the PDF separately for every sheet. Every indexed
-sheet remains in the inventory, including sheets with zero recognized labels.
-Unmatched detection pages and pages with multiple index records remain in an
-explicit unmatched list with warnings; they are never joined by title or guessed
-sheet number.
-
-The default mode uses the existing safe coordinate deduplication rule: only the
-same page, normalized section, and near-identical bounding box are collapsed.
-`--raw` keeps every accepted source detection. In deduplicated mode, detection
-counts are retained-record counts and do not add `duplicate_count` again.
-`duplicate_count` remains evidence of how many overlapping source records were
-represented. Package summaries report both detection occurrences and distinct
-sheet counts. A sheet with several named areas contributes its detections to each
-area bucket intentionally.
-
-Run the real package from macOS Terminal:
-
-```bash
-python -m shoplens.cli section-inventory \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf"
-python -m shoplens.cli section-inventory \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" --list
-python -m shoplens.cli section-inventory \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --sheet S1-20A --list
-python -m shoplens.cli section-inventory \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --subject ROOF_FRAMING --family W --list
-python -m shoplens.cli section-inventory \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --section W18X35 --list
-python -m shoplens.cli section-inventory \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --without-detections --list
-```
-
-Metadata and detection filters can be combined: `--sheet`, `--page`, `--kind`,
-`--subject`, `--level`, `--segment`, `--area`, `--family`, and `--section`.
-`--with-detections` and `--without-detections` select sheets by presence. Add
-`--detections` only when individual coordinates are needed, or `--debug` to show
-the joined package-index record, extraction pages, raw/deduplicated counts,
-duplicate suppression, filters, and warnings. Framing plans and elevations are
-often the most relevant future inputs for member association, but the inventory
-does not hardcode a sheet-kind restriction.
-
-JSON includes the complete package summary, inventory version, mode, warnings,
-all selected sheets, individual detection coordinates, classification metadata,
-and active filters:
-
-```bash
-python -m shoplens.cli section-inventory drawing.pdf --json
+python -m shoplens.cli section-inventory drawing.pdf
+python -m shoplens.cli section-inventory drawing.pdf --list
 python -m shoplens.cli section-inventory drawing.pdf \
-  --subject FLOOR_FRAMING --section W18X35 --json
-```
+  --sheet <SHEET_ID> \
+  --list
+python -m shoplens.cli section-inventory drawing.pdf \
+  --subject ROOF_FRAMING \
+  --family W \
+  --list
+python -m shoplens.cli section-inventory drawing.pdf \
+  --section W18X35 \
+  --list
+python -m shoplens.cli section-inventory drawing.pdf \
+  --without-detections \
+  --list
 
-Export one matching detection per CSV row with Python's standard CSV writer:
+CSV export:
 
-```bash
-python -m shoplens.cli section-inventory \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
+python -m shoplens.cli section-inventory drawing.pdf \
   --csv /tmp/shoplens-section-inventory.csv
-```
 
-The CSV preserves page, sheet metadata, original and normalized label text,
-family, signed raw coordinates, confidence, duplicate count, and record mode. A
-zero-result selection still writes a valid header-only CSV.
+Structural grid-system extraction
 
-## Extract a plan grid system
+grid-system extracts a structural grid from one selected plan page.
 
-`grid-system` extracts one selected plan page at a time. It reports contextual
-grid-bubble labels, horizontal and vertical logical axes, merged source
-segments, approximate extents, intersections, evidence, rejected candidates,
-and confidence. It does not associate an axis with a beam, column, steel label,
-or physical member.
+It reports:
 
-ShopLens keeps `pdf_inspector` as its fast text, title-block, and classification
-provider. The checked-in Rust parser already tracks the current transformation
-matrix and internally extracts stroked `m`/`l` line segments and `re`
-rectangles in the same space as positioned text. This branch adds an additive
-geometry binding for that existing information. Until a local native extension
-is rebuilt with the binding, the adapter falls back to `pypdf>=6.15,<7`, a
-pure-Python library under the permissive BSD-3-Clause license. No PyMuPDF or
-copyleft runtime dependency was added. The fallback is necessary only because
-the previously published Python API exposes positioned text but not page boxes
-or vector paths.
+contextual grid-bubble labels
 
-The geometry adapter preserves PDF user-space values and never applies
-`abs(x)` or `abs(y)`. `/MediaBox`, `/CropBox`, and `/Rotate` are recorded
-separately. A page's displayed rotation does not by itself prove that
-`pdf_inspector` rotated extracted coordinates: ShopLens tests positioned-text
-anchors against each explicitly transformed crop box and selects the matching
-coordinate convention. This preserves the negative Y coordinates on layouts
-that `pdf_inspector` normalizes by 90 degrees while leaving the other layout in
-raw bottom-left PDF coordinates. Rotation and non-zero crop-offset conversions
-have synthetic tests.
+horizontal logical axes
 
-Grid candidates require contextual evidence. The current deterministic detector
-uses consistently sized ellipse bubbles, aligned label runs, repeated labels at
-opposite ends when present, collinear line coverage, and perpendicular
-intersections. Dashed or split paths are retained as source segments and merged
-into logical extents. Short lines, inconsistent bubbles, detail/section
-references, and uncontextual schedule numbers do not become axes. Spatially
-separate similarly strong label runs produce `MULTIPLE_SIMILAR_GRID_SYSTEMS`
-instead of being silently merged.
+vertical logical axes
 
-Run one of the known sheets from macOS Terminal:
+merged source segments
 
-```bash
-python -m shoplens.cli grid-system \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --sheet S1-20A --list
-python -m shoplens.cli grid-system \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --sheet S1-20A --debug
-python -m shoplens.cli grid-system \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --sheet S1-20A --svg /tmp/shoplens-grid-S1-20A.svg
-open /tmp/shoplens-grid-S1-20A.svg
-```
+approximate extents
 
-`--page 27` can be used instead of `--sheet S1-20A`. Add `--json` for the
-complete page geometry, axis source segments, label evidence, classification
-metadata, rejected candidates, coordinate conversion, warnings, and grid
-version. The SVG is standard-library XML containing geometry and text labels
-only; it never embeds the confidential PDF page image.
+perpendicular intersections
 
-Current limits are deliberate. Form XObject geometry is not recursively
-expanded by the fallback. Dash patterns and line widths are available only
-when the provider retains them. Bezier paths are reduced to explainable shape
-bounds for bubble evidence, not treated as general-purpose CAD curves. The
-detector returns the strongest spatial grid system and warns about close
-alternatives; it does not process all 92 sheets by default, use OCR, or claim
-that every architectural offset grid will be resolved.
+evidence
 
-## Grid-relative section localization
+rejected candidates
 
-`grid-locate-sections` places existing, positioned section-label annotations
-relative to the accepted axes on one selected sheet. The annotation anchor is
-the center of its original bounding box; raw X, Y, width, and height remain
-unchanged in the result. Axes are ordered by page coordinate rather than by
-their alphabetic or numeric labels. Signed distances are `anchor - axis` in
-the page's recorded PDF coordinate units.
+confidence
 
-An annotation is inside the dominant grid only when its anchor lies between
-both axis families and within accepted axis extents in both dimensions. Bay
-names come from the spatially surrounding axes. Points within 6 PDF units of
-an axis are reported explicitly as `ON <label>` and are not counted as
-complete bays. Confidence is a deterministic rule-strength score built from
-grid confidence, available axis families, extent containment, complete
-surrounding intervals, on-axis evidence, and ambiguity penalties; it is not a
-statistical probability.
+coherent primary and secondary grid systems
 
-```bash
-python -m shoplens.cli grid-locate-sections \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --sheet S1-20A --list
-python -m shoplens.cli grid-locate-sections \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --sheet S1-20A --section W24X55 --detections
-python -m shoplens.cli grid-locate-sections \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --sheet S1-20A --svg /tmp/shoplens-grid-sections-S1-20A.svg
-```
+ShopLens combines positioned text and vector evidence rather than accepting
+grid-like text alone.
 
-The command defaults to the inventory's deduplicated records and supports
-`--raw`, `--family`, `--section`, `--inside-only`, `--outside-only`, and
-`--ambiguous-only`. JSON retains the selected record mode and active filters.
-The SVG contains only grid geometry and annotation text. Localization does not
-associate an annotation with a beam, column, joist, or other physical member.
+The detector supports:
 
-## Member-line candidates
+repeated bubble labels
 
-`member-line-candidates` reviews existing PDF vector segments inside one
-selected framing plan. Its output deliberately uses the term
-`MEMBER_LINE_CANDIDATE`: a line is not identified as a beam, joist, brace,
-column, wall, or other confirmed member.
+multiple bubble-size families
 
-The dominant plan region is the rectangle between the outer accepted grid
-coordinates, with a documented margin equal to 3% of the page's shorter
-dimension. Both endpoints must fall inside that expanded region. Exact and
-reversed duplicates are suppressed only when endpoints, line width, dash
-pattern, and geometry source agree within small tolerances. Collinear segments
-merge only when orientation, offset, width, dash style, source, and endpoint
-gap are compatible; small gaps at accepted grid intersections remain split.
+dashed and fragmented axes
 
-Before scoring, ShopLens rejects accepted grid-axis geometry, page borders,
-geometry outside the plan region, deterministic dimension lines with
-perpendicular endpoint ticks, short bent leaders terminating near text, and
-insignificant segments. Outside-plan density and position distinguish likely
-schedules, title blocks, and detail borders. Remaining candidates gain
-rule-strength from plan containment, substantial length, grid-adjacent
-endpoints, crossed grids, collinear-chain evidence, and plausible orientation.
-Confidence is explainable rule strength, not probability.
+spatially disconnected systems
 
-Accounting is reported at three distinct stages. Raw segments reconcile as
-duplicates suppressed plus unique segments evaluated. Unique segments reconcile
-as primitive rejections plus segments entering chain construction. Evaluated
-chains reconcile as accepted member-line candidates plus rejected chains. A
-chain may contain multiple source segments, so segments entering construction
-do not generally equal the number of evaluated chains. In JSON,
-`rejected_candidate_count` is retained for compatibility but is deprecated: it
-combines duplicate-suppression records, primitive-stage rejection records, and
-chain-stage rejection records. Consumers should use the stage-specific counts.
+shared row or column coordinates
 
-```bash
-python -m shoplens.cli member-line-candidates \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --sheet S1-20A --list
-python -m shoplens.cli member-line-candidates \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --sheet S1-20A --orientation HORIZONTAL --min-confidence 0.80
-python -m shoplens.cli member-line-candidates \
-  "/Users/vibhanshumishra/Desktop/07 STRUCTURAL - DD.pdf" \
-  --sheet S1-20A --svg /tmp/shoplens-member-lines-S1-20A.svg
-```
+candidate-local fragmented-axis recovery
 
-The SVG contains page, plan-region, grid, candidate, endpoint, and ID geometry
-only. `--include-rejected` or `--debug` adds rejected geometry to the overlay
-and structured output. No confidential PDF page image is embedded, and nearby
-section labels are not associated with candidates.
+fixed-point recovery across orientations
 
-## Local validation suite
+final symmetric intersection recomputation
 
-`validate-suite` discovers PDFs recursively and runs five package-level stages:
-PDF health, Sheet List extraction, title-block extraction, reconciliation, and
-package classification. It deliberately does not run grids, member lines, or
-linear patterns. A `PASS` means the stage executed and met structural output
-checks; extraction and classification stages remain `NOT_REVIEWED` until a
-person validates correctness. An unreviewed pass is never a geometry claim.
+Ambiguous short-stroke bridges are deliberately prevented from connecting
+otherwise separate grid systems.
 
-```bash
-.venv/bin/python -m shoplens.cli validate-suite \
-  "/path/to/local-evaluation-folder" \
+The geometry adapter uses the native parser when available and falls back to:
+
+pypdf>=6.15,<7
+
+when required geometry is not exposed by the installed native binding.
+
+Run:
+
+python -m shoplens.cli grid-system drawing.pdf \
+  --sheet <SHEET_ID> \
+  --list
+
+python -m shoplens.cli grid-system drawing.pdf \
+  --sheet <SHEET_ID> \
+  --debug
+
+python -m shoplens.cli grid-system drawing.pdf \
+  --sheet <SHEET_ID> \
+  --svg /tmp/shoplens-grid.svg
+
+A physical PDF page can also be selected:
+
+python -m shoplens.cli grid-system drawing.pdf \
+  --page <PDF_PAGE> \
+  --list
+
+The SVG contains generated diagnostic geometry and text. It does not embed a
+source-page raster image.
+
+Grid-relative section localization
+
+grid-locate-sections places positioned section-label annotations relative to
+accepted grid axes on a selected sheet.
+
+Every detection receives one exclusive localization status:
+
+COMPLETE_BAY
+ON_AXIS
+OUTSIDE_GRID
+AMBIGUOUS
+UNLOCALIZED
+
+Axes are ordered spatially by page coordinate.
+
+Raw annotation coordinates remain unchanged.
+
+Run:
+
+python -m shoplens.cli grid-locate-sections drawing.pdf \
+  --sheet <SHEET_ID> \
+  --list
+
+python -m shoplens.cli grid-locate-sections drawing.pdf \
+  --sheet <SHEET_ID> \
+  --section W18X35 \
+  --detections
+
+python -m shoplens.cli grid-locate-sections drawing.pdf \
+  --sheet <SHEET_ID> \
+  --svg /tmp/shoplens-grid-sections.svg
+
+Localization does not yet associate an annotation with a specific beam, column,
+joist, brace, wall, or other physical member.
+
+Member-line candidates
+
+member-line-candidates reviews PDF vector segments inside one selected framing
+plan.
+
+Its output intentionally uses:
+
+MEMBER_LINE_CANDIDATE
+
+A candidate is not asserted to be a beam, joist, brace, column, wall, or other
+confirmed structural member.
+
+Before scoring, ShopLens can reject geometry such as:
+
+accepted grid-axis lines
+
+page borders
+
+geometry outside the plan region
+
+deterministic dimension lines
+
+short bent leaders
+
+insignificant segments
+
+Remaining candidates gain deterministic rule strength from evidence such as:
+
+plan containment
+
+substantial length
+
+grid-adjacent endpoints
+
+crossed grids
+
+compatible collinear chains
+
+plausible orientation
+
+Accounting is separated into:
+
+raw segments
+→ duplicate suppression
+→ unique segments
+→ primitive rejection
+→ segments entering merge
+→ evaluated chains
+→ accepted candidates / rejected chains
+
+Run:
+
+python -m shoplens.cli member-line-candidates drawing.pdf \
+  --sheet <SHEET_ID> \
+  --list
+
+python -m shoplens.cli member-line-candidates drawing.pdf \
+  --sheet <SHEET_ID> \
+  --orientation HORIZONTAL \
+  --min-confidence 0.80
+
+python -m shoplens.cli member-line-candidates drawing.pdf \
+  --sheet <SHEET_ID> \
+  --svg /tmp/shoplens-member-lines.svg
+
+No nearby steel-section label is currently associated with a candidate.
+
+Repetitive linear-pattern clustering
+
+ShopLens can cluster accepted MEMBER_LINE_CANDIDATE records into neutral
+repetitive linear patterns without changing upstream candidate geometry.
+
+Pattern taxonomy includes:
+
+PARALLEL_LINE_GROUP
+REGULAR_SPACING_FIELD
+DOUBLE_LINE_PAIR_GROUP
+ORTHOGONAL_NETWORK
+COLLINEAR_CHAIN_GROUP
+DENSE_LINEAR_FIELD
+ISOLATED_CANDIDATE_GROUP
+MIXED_LINEAR_PATTERN
+UNKNOWN_LINEAR_PATTERN
+
+Patterns remain neutral geometric observations.
+
+A broad dense field is not automatically called joists, deck, walls, hatching,
+or confirmed framing.
+
+Run:
+
+python -m shoplens.cli linear-patterns drawing.pdf \
+  --sheet <SHEET_ID> \
+  --list
+
+python -m shoplens.cli linear-patterns drawing.pdf \
+  --sheet <SHEET_ID> \
+  --svg /tmp/shoplens-linear-patterns.svg
+
+Local validation suite
+
+validate-suite recursively discovers PDFs and runs package-level structural
+checks.
+
+Current package stages:
+
+PDF_HEALTH
+SHEET_LIST
+TITLE_BLOCKS
+SHEET_RECONCILIATION
+PACKAGE_CLASSIFICATION
+
+The package validator intentionally does not claim geometry correctness.
+
+python -m shoplens.cli validate-suite \
+  "/path/to/evaluation-folder" \
   --json /tmp/shoplens-validation/current.json \
   --markdown /tmp/shoplens-validation/current.md \
   --csv /tmp/shoplens-validation/current.csv
-```
 
-Use `--file NAME`, `--max-files N`, or JSON configuration to select inputs.
-`--compare previous.json` reports regressions, improvements, new packages, and
-removed packages by relative filename. Normal JSON omits absolute local paths;
-`--debug` includes them intentionally. The working tree state and Git revision
-are recorded when Git is available.
+Compare with an earlier result:
 
-Each stage is failure-isolated, so later independent stages still run when
-possible and dependent stages explain why they were skipped. A positive
-`timeout_per_stage` uses the host's monotonic interval timer. This safely records
-timeouts for interruptible Python work on macOS/Unix, but a native parser call
-that does not respond to process signals may still require future subprocess
-isolation. Generated reports default to `/tmp/shoplens-validation/` when output
-paths are omitted and must not be written into the confidential corpus unless
-the user explicitly chooses that location.
+python -m shoplens.cli validate-suite \
+  "/path/to/evaluation-folder" \
+  --compare /path/to/previous-validation.json
 
-For packages without a usable Sheet List, validation reports reconciliation as
-`NOT_APPLICABLE` and continues classification from confident title-block-only
-records. Title-block failures, unidentified pages, ambiguity, and low confidence
-remain visible; this behavior does not manufacture complete indexes.
+Normal reports are designed to use relative package names rather than exposing
+absolute local source paths.
 
-## Tests
+A PASS means the stage executed and met its structural output checks. It does
+not mean a human has reviewed every engineering result.
 
-Run the ShopLens unit tests without drawings:
+Validation philosophy
 
-```bash
-python -m unittest discover -s tests/unit -v
-```
+ShopLens development follows a few rules:
 
-After building the extension, run all Python binding tests:
+Reproduce a failure before changing detection logic.
 
-```bash
+Fix the smallest demonstrated root cause.
+
+Add focused synthetic regression coverage.
+
+Validate against multiple drawing conventions.
+
+Preserve prior supported geometry unless a result is demonstrated to be a
+false positive.
+
+Treat increased detection counts and decreased detection counts with equal
+skepticism.
+
+Keep package validation separate from geometry validation.
+
+Preserve diagnostic evidence for ambiguous or rejected results.
+
+Testing
+
+Run ShopLens unit tests:
+
+python -m pytest tests/unit -q
+
+Run the Python binding tests:
+
 python -m pytest tests/test_python.py tests/unit
-```
 
-Run the upstream Rust quality checks:
+Run Rust checks:
 
-```bash
 cargo fmt --check
 cargo clippy -- -D warnings
 cargo test
 cargo build --release
-```
 
-## Current limitations
+Compile-check Python:
 
-- Only native text is supported; scanned/image-only PDFs need OCR, which is out
-  of scope for this milestone.
-- A label must be complete within one extracted text item. The detector accepts
-  a small positioned-text interface so nearby-item joining can be added later.
-- For multiple labels inside one text item, ShopLens estimates each label's
-  horizontal box from its character span. A label occupying the complete item
-  retains the extractor's exact box.
-- Supported syntax is intentionally conservative to avoid confusing scales,
-  dates, sheet numbers, dimensions, and grid labels with steel sections.
-- W-shapes require a whole-number nominal depth, while decimal weights such as
-  `W6X8.5` remain valid. Notation such as `W2.9XW2.9` or extraction variants
-  missing the second W, such as `W2.9X2.9`, are excluded from structural steel
-  results and diagnosed as `WELDED_WIRE_REINFORCEMENT`. This is only a
-  diagnostic exclusion; reinforcement extraction will be a separate future
-  capability. W-shape checking remains syntax-based rather than a complete
-  AISC catalog validation.
-- Raw PDF coordinates may legitimately be negative because of page rotation,
-  crop boxes, transformed CAD content, or shifted drawing origins. ShopLens
-  preserves them exactly and never applies `abs()`. The public positioned-text
-  API does not expose page width, page height, rotation, media box, or crop box,
-  so reliable normalized top-left coordinates cannot yet be calculated.
-- ShopLens detects label text and location, but still does not know which label
-  belongs to which beam or other drawn member.
-- Sheet List and title-block extraction require native positioned text. They do
-  not read image-only tables, infer missing Sheet List columns, or classify sheets.
-- Title-block extraction learns layouts only from the current PDF. Packages with
-  fewer than two confidently labeled pages, unusually fragmented labels, or titles
-  outside the nearby title region may remain low-confidence. Revision extraction
-  is intentionally conservative.
-- Classification is title-based and does not inspect drawing geometry or content.
-  Unusual forms such as 3D views may remain unknown until a reusable taxonomy rule
-  is justified. A title that names multiple levels produces `LEVEL_CONFLICT`
-  instead of an arbitrary primary level.
-- Section inventory remains label-based. Grid-relative localization can describe
-  where an annotation lies, but it does not associate that annotation with drawn
-  member lines, beams, columns, schedules, or physical quantities, and it does
-  not compare structural sheets with shop drawings.
-- Continuation without repeated headers is limited to the page immediately
-  following a confirmed list page inside the selected range. Complex wrapped
-  multi-line titles may require future row-continuation logic.
+python -m compileall shoplens
+
+Check the diff:
+
+git diff --check
+
+Current limitations
+
+Native-text/vector PDFs are the primary target.
+
+OCR is not currently part of the extraction pipeline.
+
+Steel-section recognition is syntax-based and intentionally conservative.
+
+Some valid labels may remain unrecognized when text is fragmented in unusual
+ways.
+
+Title-block discovery depends on recurring and/or strongly labeled evidence.
+
+Sheet classification is primarily title-based.
+
+Grid detection requires physical bubble/vector evidence.
+
+Fragmented-axis recovery requires an already coherent candidate system.
+
+Secondary grids are emitted only when independent geometry supports them.
+
+Grid localization does not establish physical member identity.
+
+Member-line detection remains candidate-level rather than semantic member
+classification.
+
+Linear-pattern clustering remains neutral and does not infer drafting meaning.
+
+The package validation suite does not validate grid/member/pattern geometry.
+
+ShopLens does not currently compare drawing revisions or design drawings with
+fabrication/shop drawings.
+
+ShopLens does not perform structural analysis, design, or code checking.
+
+Documentation examples
+
+Public documentation should use synthetic examples only.
+
+Use placeholders such as:
+
+drawing.pdf
+<SHEET_ID>
+<SHEET_TITLE>
+<PDF_PAGE>
+<LEVEL>
+<SEGMENT>
+<AREA>
+
+Do not place machine-specific absolute paths, project filenames, client/project
+identifiers, or evaluation-dataset sheet identities into README files, public
+documentation, tests intended for publication, screenshots, or examples.
+
+Local evaluation inputs and generated validation artifacts should remain outside
+the repository.
+
+Design principles
+
+Evidence over guessing
+
+A text string that resembles a structural object is not enough by itself.
+
+ShopLens prefers physical drawing evidence and multiple independent signals.
+
+Preserve uncertainty
+
+Unsupported observations remain unassigned, ambiguous, or unknown.
+
+Cross-layout behavior
+
+Rules should generalize across different drawing conventions rather than target
+one package's coordinates, filenames, or naming scheme.
+
+Deterministic first
+
+Current ShopLens interpretation is rule- and geometry-based.
+
+Diagnostics are first-class
+
+Warnings, rejected candidates, confidence, evidence, JSON, and SVG diagnostics
+are part of the development workflow.
+
+Roadmap
+
+The current foundation supports future work in areas such as:
+
+PDF understanding
+      ↓
+sheet identity
+      ↓
+structural section labels
+      ↓
+grid systems
+      ↓
+grid-relative localization
+      ↓
+member association
+      ↓
+drawing relationships
+      ↓
+cross-sheet structural context
+
+Future capabilities should remain evidence-backed and independently testable.
+
+License
+
+See LICENSE for repository licensing information.
+
+ShopLens builds on Firecrawl's open-source pdf-inspector; upstream attribution
+and licensing are preserved.
