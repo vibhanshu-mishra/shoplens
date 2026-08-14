@@ -314,20 +314,20 @@ python -m shoplens.cli <command> drawing-set.pdf
 Grid extraction can operate on a resolved structural sheet rather than requiring the user to determine its physical PDF page manually.
 
 ```bash
-python -m shoplens.cli grid-system drawing-set.pdf --sheet S104A
+python -m shoplens.cli grid-system drawing-set.pdf --sheet <SHEET_ID>
 ```
 
 Readable output reports information such as:
 
 ```text
-Sheet: S104A
-PDF page: 9
-Grid systems: 1
-Secondary grid systems: 0
-Horizontal grid axes: 6
-Vertical grid axes: 6
-Unassigned grid labels: 5
-Rejected candidates: 14
+Sheet: <SHEET_ID>
+PDF page: <PAGE>
+Grid systems: <COUNT>
+Secondary grid systems: <COUNT>
+Horizontal grid axes: <COUNT>
+Vertical grid axes: <COUNT>
+Unassigned grid labels: <COUNT>
+Rejected candidates: <COUNT>
 ```
 
 Use the CLI help for the exact output, JSON, SVG, filtering, and diagnostic options supported by the current checkout:
@@ -523,6 +523,48 @@ PACKAGE_CLASSIFICATION
 ```
 
 Validation is designed around regression evidence rather than assuming that a higher raw detection count is automatically better.
+
+### Local geometry regression harness
+
+`validate-geometry` is a separate local workflow for protecting grid and
+grid-relative localization behavior on selected drawings. Its configuration and
+baselines are caller-provided files and should remain outside the repository.
+
+```json
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "case-001",
+      "pdf": "/local/path/to/drawing.pdf",
+      "sheet": "<SHEET_ID>",
+      "checks": ["GRID", "LOCALIZATION"]
+    }
+  ]
+}
+```
+
+Use a one-based `page` instead of `sheet` when the physical page is already
+known; a case may include both, with `page` taking precedence.
+
+Create a baseline explicitly, then compare later runs:
+
+```bash
+python -m shoplens.cli validate-geometry /path/to/local-config.json \
+  --write-baseline /path/to/geometry-baseline.json
+
+python -m shoplens.cli validate-geometry /path/to/local-config.json \
+  --compare /path/to/geometry-baseline.json \
+  --json /path/to/current.json --markdown /path/to/current.md --csv /path/to/current.csv
+```
+
+The compact baseline records grid axes, coordinate and intersection metadata,
+secondary-system summaries, and localization counts. Axis matching uses label,
+orientation, and coordinate-aware pairing with a configurable 2-point default
+tolerance. Lost axes are regressions; new axes, coordinate moves, grid-system
+changes, and localization shifts require review rather than being called
+improvements automatically. Normal reports identify only `case_id`; `--debug`
+is required to include configured source paths in JSON.
 
 ---
 

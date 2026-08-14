@@ -30,6 +30,15 @@ from shoplens.inventory import (
     matching_detections,
 )
 from shoplens.geometry import extract_page_geometry
+from shoplens.geometry_validation import (
+    compare_geometry_reports,
+    load_geometry_config,
+    run_geometry_validation,
+    write_geometry_baseline,
+    write_geometry_csv,
+    write_geometry_json,
+    write_geometry_markdown,
+)
 from shoplens.grids import detect_grid_system, export_grid_svg
 from shoplens.localization import (
     export_localization_svg,
@@ -282,6 +291,18 @@ def _parser() -> argparse.ArgumentParser:
     validation_parser.add_argument("--package-only", action="store_true")
     validation_parser.add_argument("--deep", action="store_true")
     validation_parser.add_argument("--compare", type=Path, help="compare against prior JSON")
+
+    geometry_validation_parser = subparsers.add_parser(
+        "validate-geometry", help="run local grid and localization regression cases"
+    )
+    geometry_validation_parser.add_argument("config", type=Path, help="local geometry case configuration JSON")
+    geometry_validation_parser.add_argument("--write-baseline", type=Path, help="explicitly write a new geometry baseline JSON")
+    geometry_validation_parser.add_argument("--overwrite-baseline", action="store_true", help="allow replacing --write-baseline")
+    geometry_validation_parser.add_argument("--compare", type=Path, help="compare against an existing geometry baseline JSON")
+    geometry_validation_parser.add_argument("--json", type=Path, help="write a structured JSON report")
+    geometry_validation_parser.add_argument("--markdown", type=Path, help="write a Markdown report")
+    geometry_validation_parser.add_argument("--csv", type=Path, help="write a per-case CSV report")
+    geometry_validation_parser.add_argument("--debug", action="store_true", help="include configured absolute source paths in JSON")
     return parser
 
 
@@ -1350,6 +1371,64 @@ def _run_validate_suite(args: argparse.Namespace) -> int:
     return 1 if result.packages_failed else 0
 
 
+def _run_validate_geometry(args: argparse.Namespace) -> int:
+    if args.overwrite_baseline and not args.write_baseline:
+        print("Error: --overwrite-baseline requires --write-baseline.", file=sys.stderr)
+        return 2
+    if args.write_baseline and args.compare:
+        print("Error: choose either --write-baseline or --compare for one run.", file=sys.stderr)
+        return 2
+    try:
+        config = load_geometry_config(args.config)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Error: invalid geometry configuration: {exc}", file=sys.stderr)
+        return 2
+    result = run_geometry_validation(config)
+    if args.compare:
+        try:
+            baseline = json.loads(args.compare.read_text(encoding="utf-8"))
+            if baseline.get("schema_version") != 1 or not isinstance(baseline.get("case_results"), list):
+                raise ValueError("baseline must be a schema_version 1 geometry report")
+            result.comparison = compare_geometry_reports(
+                result.to_dict(debug=False), baseline, config.coordinate_tolerance
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Error: invalid geometry comparison baseline: {exc}", file=sys.stderr)
+            return 2
+    try:
+        if args.write_baseline:
+            write_geometry_baseline(args.write_baseline, result, overwrite=args.overwrite_baseline)
+        if args.json:
+            write_geometry_json(args.json, result, debug=args.debug)
+        if args.markdown:
+            write_geometry_markdown(args.markdown, result)
+        if args.csv:
+            write_geometry_csv(args.csv, result)
+    except (OSError, FileExistsError) as exc:
+        print(f"Error: could not write geometry report: {exc}", file=sys.stderr)
+        return 2
+
+    print("ShopLens Geometry Validation")
+    if args.write_baseline:
+        print("Baseline mode: establishing explicit local expectations; no correctness claim is implied.")
+    print(f"Cases: {len(result.case_results)}")
+    print(f"Execution errors: {sum(item.execution_status != 'PASS' for item in result.case_results)}")
+    print(f"Coordinate tolerance: {result.coordinate_tolerance:.3f} points")
+    print(f"Total runtime: {result.runtime_seconds:.3f} seconds")
+    for item in result.case_results:
+        grid = item.grid or {}
+        print(
+            f"{item.execution_status} | {item.case_id} | "
+            f"H={len(grid.get('horizontal_axes', []))} V={len(grid.get('vertical_axes', []))}"
+        )
+    if result.comparison:
+        print("Baseline comparison:")
+        for change in result.comparison["case_changes"]:
+            print(f"{change['change']} | {change['case_id']}")
+    has_regression = bool(result.comparison and result.comparison["summary"].get("REGRESSION"))
+    return 1 if has_regression or any(item.execution_status != "PASS" for item in result.case_results) else 0
+
+
 def _validation_stage_detail(stage) -> str:
     metrics = stage.metrics
     if stage.stage_name == "SHEET_LIST" and "declared_sheet_count" in metrics:
@@ -1387,6 +1466,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_grid_locate_sections(args)
     if args.command == "validate-suite":
         return _run_validate_suite(args)
+    if args.command == "validate-geometry":
+        return _run_validate_geometry(args)
     return _run_member_line_candidates(args)
 
 
