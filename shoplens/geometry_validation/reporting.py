@@ -32,12 +32,15 @@ def write_geometry_markdown(path: Path, result: GeometryValidationResult) -> Non
         localization = case.localization or {}
         axes = f"H={len(grid.get('horizontal_axes', []))} V={len(grid.get('vertical_axes', []))}" if grid else "-"
         localized = f"complete={localization.get('complete_bay', 0)} outside={localization.get('outside_grid', 0)}" if localization else "-"
-        lines.append(f"| {case.case_id} | {case.execution_status} | {axes} | {localized} |")
+        lines.append(f"| {_markdown_cell(case.case_id)} | {_markdown_cell(case.execution_status)} | {_markdown_cell(axes)} | {_markdown_cell(localized)} |")
     if result.comparison:
         lines.extend(["", "## Baseline comparison", ""])
         for item in result.comparison.get("case_changes", []):
-            lines.append(f"- {item['change']}: {item['case_id']}")
-            lines.extend(f"  - {detail['kind']}: {detail}" for detail in item["details"])
+            lines.append(f"- {_markdown_cell(item['change'])}: {_markdown_cell(item['case_id'])}")
+            lines.extend(
+                f"  - {_markdown_cell(detail['kind'])}: {_markdown_cell(json.dumps(detail, sort_keys=True))}"
+                for detail in item["details"]
+            )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -52,8 +55,36 @@ def write_geometry_csv(path: Path, result: GeometryValidationResult) -> None:
         writer.writeheader()
         for case in result.case_results:
             grid, localization = case.grid or {}, case.localization or {}
-            writer.writerow({"case_id": case.case_id, "execution_status": case.execution_status, "comparison_status": comparison.get(case.case_id, ""), "selected_page": case.selected_page or "", "horizontal_axis_count": len(grid.get("horizontal_axes", [])), "vertical_axis_count": len(grid.get("vertical_axes", [])), "grid_system_count": grid.get("grid_system_count", ""), "unassigned_label_count": grid.get("unassigned_label_count", ""), "rejected_candidate_count": grid.get("rejected_candidate_count", ""), "grid_warnings": ";".join(grid.get("warnings", [])), "complete_bay": localization.get("complete_bay", ""), "on_axis": localization.get("on_axis", ""), "outside_grid": localization.get("outside_grid", ""), "ambiguous": localization.get("ambiguous", ""), "unlocalized": localization.get("unlocalized", "")})
+            writer.writerow({
+                "case_id": _csv_safe_cell(case.case_id),
+                "execution_status": _csv_safe_cell(case.execution_status),
+                "comparison_status": _csv_safe_cell(comparison.get(case.case_id, "")),
+                "selected_page": case.selected_page or "",
+                "horizontal_axis_count": len(grid.get("horizontal_axes", [])),
+                "vertical_axis_count": len(grid.get("vertical_axes", [])),
+                "grid_system_count": grid.get("grid_system_count", ""),
+                "unassigned_label_count": grid.get("unassigned_label_count", ""),
+                "rejected_candidate_count": grid.get("rejected_candidate_count", ""),
+                "grid_warnings": _csv_safe_cell(";".join(grid.get("warnings", []))),
+                "complete_bay": localization.get("complete_bay", ""),
+                "on_axis": localization.get("on_axis", ""),
+                "outside_grid": localization.get("outside_grid", ""),
+                "ambiguous": localization.get("ambiguous", ""),
+                "unlocalized": localization.get("unlocalized", ""),
+            })
 
 
 def _prepare(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _markdown_cell(value: Any) -> str:
+    return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", "<br>")
+
+
+def _csv_safe_cell(value: Any) -> Any:
+    """Prevent spreadsheet formula evaluation for user-controlled string cells."""
+
+    if isinstance(value, str) and value and (value[0] in "=+-@\t\r\n"):
+        return "'" + value
+    return value

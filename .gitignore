@@ -46,6 +46,9 @@ __pycache__/
 # Local strategic roadmap
 /SHOPLENS_FUTURE_ROADMAP.md
 
+# Local confidential evaluation drawings
+/Shoplens-evaluation/
+
 # Optional repository-local validation reports
 /validation-output/
 /geometry-validation-output/

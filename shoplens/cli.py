@@ -38,6 +38,7 @@ from shoplens.geometry_validation import (
     write_geometry_csv,
     write_geometry_json,
     write_geometry_markdown,
+    validate_geometry_baseline,
 )
 from shoplens.grids import detect_grid_system, export_grid_svg
 from shoplens.localization import (
@@ -1386,9 +1387,9 @@ def _run_validate_geometry(args: argparse.Namespace) -> int:
     result = run_geometry_validation(config)
     if args.compare:
         try:
-            baseline = json.loads(args.compare.read_text(encoding="utf-8"))
-            if baseline.get("schema_version") != 1 or not isinstance(baseline.get("case_results"), list):
-                raise ValueError("baseline must be a schema_version 1 geometry report")
+            baseline = validate_geometry_baseline(
+                json.loads(args.compare.read_text(encoding="utf-8"))
+            )
             result.comparison = compare_geometry_reports(
                 result.to_dict(debug=False), baseline, config.coordinate_tolerance
             )
@@ -1425,8 +1426,11 @@ def _run_validate_geometry(args: argparse.Namespace) -> int:
         print("Baseline comparison:")
         for change in result.comparison["case_changes"]:
             print(f"{change['change']} | {change['case_id']}")
-    has_regression = bool(result.comparison and result.comparison["summary"].get("REGRESSION"))
-    return 1 if has_regression or any(item.execution_status != "PASS" for item in result.case_results) else 0
+    comparison_failed = bool(
+        result.comparison
+        and any(result.comparison["summary"].get(status) for status in ("REGRESSION", "REVIEW_REQUIRED", "ERROR", "NEW_CASE", "REMOVED_CASE"))
+    )
+    return 1 if comparison_failed or any(item.execution_status != "PASS" for item in result.case_results) else 0
 
 
 def _validation_stage_detail(stage) -> str:

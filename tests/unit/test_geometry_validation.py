@@ -1,10 +1,15 @@
 """Synthetic privacy-safe coverage for geometry regression reporting."""
 
 import json
+import contextlib
+import io
+import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
+from shoplens import cli
 from shoplens.geometry_validation import (
     GeometryCaseConfig,
     GeometryValidationConfig,
@@ -15,7 +20,10 @@ from shoplens.geometry_validation import (
     write_geometry_csv,
     write_geometry_json,
     write_geometry_markdown,
+    validate_geometry_baseline,
 )
+from shoplens.geometry_validation.models import GeometryValidationResult
+from shoplens.geometry_validation.runner import _git_revision
 
 
 def axis(orientation, label, coordinate, intersections=2):
@@ -27,7 +35,15 @@ def axis(orientation, label, coordinate, intersections=2):
     }
 
 
-def case(case_id="case-001", *, horizontal=None, vertical=None, systems=1, localization=None):
+def system(system_id, horizontal=None, vertical=None):
+    return {
+        "grid_system_id": system_id,
+        "horizontal_axes": horizontal or [],
+        "vertical_axes": vertical or [],
+    }
+
+
+def case(case_id="case-001", *, horizontal=None, vertical=None, systems=1, secondary=None, localization=None, warnings=None):
     return {
         "case_id": case_id,
         "execution_status": "PASS",
@@ -37,10 +53,10 @@ def case(case_id="case-001", *, horizontal=None, vertical=None, systems=1, local
             "primary_grid_system_id": "PRIMARY",
             "horizontal_axes": horizontal if horizontal is not None else [axis("HORIZONTAL", "1", 100.0)],
             "vertical_axes": vertical if vertical is not None else [axis("VERTICAL", "A", 200.0)],
-            "secondary_systems": [],
+            "secondary_systems": secondary if secondary is not None else [],
             "unassigned_label_count": 0,
             "rejected_candidate_count": 0,
-            "warnings": [],
+            "warnings": warnings or [],
         },
         "localization": localization if localization is not None else {
             "total_section_detections": 4,
@@ -89,6 +105,11 @@ class GeometryComparisonTests(unittest.TestCase):
         current = case(horizontal=[axis("HORIZONTAL", "A", 301), axis("HORIZONTAL", "A", 101)])
         self.assertEqual(self.compare(current, baseline)["summary"], {"UNCHANGED": 1})
 
+    def test_repeated_label_assignment_minimizes_total_coordinate_distance(self):
+        baseline = case(horizontal=[axis("HORIZONTAL", "A", 0), axis("HORIZONTAL", "A", 5)])
+        current = case(horizontal=[axis("HORIZONTAL", "A", 4), axis("HORIZONTAL", "A", 6)])
+        self.assertEqual(self.compare(current, baseline, tolerance=5.0)["summary"], {"UNCHANGED": 1})
+
     def test_intersection_grid_system_and_localization_changes_are_reported(self):
         current = case(
             horizontal=[axis("HORIZONTAL", "1", 100, intersections=3)],
@@ -103,6 +124,41 @@ class GeometryComparisonTests(unittest.TestCase):
         self.assertEqual({detail["kind"] for detail in details}, {
             "INTERSECTION_CHANGE", "GRID_SYSTEM_COUNT_CHANGE", "LOCALIZATION_CHANGE",
         })
+
+    def test_secondary_axes_are_compared_independently_of_primary(self):
+        baseline = case(secondary=[system("S-A", [axis("HORIZONTAL", "1", 10), axis("HORIZONTAL", "2", 20)], [axis("VERTICAL", "A", 30)])])
+        lost = case(secondary=[system("S-A", [axis("HORIZONTAL", "1", 10)], [axis("VERTICAL", "A", 30)])])
+        gained = case(secondary=[system("S-A", [axis("HORIZONTAL", "1", 10), axis("HORIZONTAL", "2", 20), axis("HORIZONTAL", "3", 30)], [axis("VERTICAL", "A", 30)])])
+        moved = case(secondary=[system("S-A", [axis("HORIZONTAL", "1", 13), axis("HORIZONTAL", "2", 20)], [axis("VERTICAL", "A", 30)])])
+        changed = case(secondary=[system("S-A", [axis("HORIZONTAL", "1", 10, intersections=3), axis("HORIZONTAL", "2", 20)], [axis("VERTICAL", "A", 30)])])
+        self.assertEqual(self.compare(lost, baseline)["summary"], {"REGRESSION": 1})
+        self.assertEqual(self.compare(gained, baseline)["summary"], {"REVIEW_REQUIRED": 1})
+        self.assertEqual(self.compare(moved, baseline)["summary"], {"REVIEW_REQUIRED": 1})
+        self.assertEqual(self.compare(changed, baseline)["summary"], {"REVIEW_REQUIRED": 1})
+
+    def test_secondary_ordering_is_not_semantic(self):
+        first = system("PAGE_1_SECONDARY_GRID_1", [axis("HORIZONTAL", "1", 10)], [axis("VERTICAL", "A", 30)])
+        second = system("PAGE_1_SECONDARY_GRID_2", [axis("HORIZONTAL", "2", 20)], [axis("VERTICAL", "B", 40)])
+        self.assertEqual(self.compare(case(secondary=[second, first]), case(secondary=[first, second]))["summary"], {"UNCHANGED": 1})
+
+    def test_secondary_system_addition_and_removal_are_reported(self):
+        secondary = system("S-A", [axis("HORIZONTAL", "1", 10)], [axis("VERTICAL", "A", 30)])
+        self.assertEqual(self.compare(case(), case(secondary=[secondary]))["summary"], {"REGRESSION": 1})
+        self.assertEqual(self.compare(case(secondary=[secondary]), case())["summary"], {"REVIEW_REQUIRED": 1})
+
+    def test_localization_distribution_changes_require_review(self):
+        baseline = case(localization={
+            "total_section_detections": 1, "complete_bay": 1, "on_axis": 0,
+            "outside_grid": 0, "ambiguous": 0, "unlocalized": 0,
+            "grid_system_distribution": {"PRIMARY": 1},
+        })
+        current = case(localization={
+            "total_section_detections": 1, "complete_bay": 1, "on_axis": 0,
+            "outside_grid": 0, "ambiguous": 0, "unlocalized": 0,
+            "grid_system_distribution": {"SECONDARY": 1},
+        })
+        details = self.compare(current, baseline)["case_changes"][0]["details"]
+        self.assertIn("LOCALIZATION_DISTRIBUTION_CHANGE", {item["kind"] for item in details})
 
     def test_new_removed_and_execution_error_are_isolated(self):
         current = report(case("case-001"), {"case_id": "case-002", "execution_status": "ERROR", "error": "failed"}, case("case-003"))
@@ -159,3 +215,83 @@ class GeometryConfigAndReportingTests(unittest.TestCase):
             path.write_text('{"schema_version": 2, "cases": []}', encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "schema_version"):
                 load_geometry_config(path)
+
+    def test_config_rejects_bool_types_and_uses_immutable_fields(self):
+        def load(value):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                path.write_text(json.dumps(value), encoding="utf-8")
+                return load_geometry_config(path)
+
+        base = {"schema_version": 1, "cases": [{"case_id": "case-001", "pdf": "drawing.pdf", "page": 1}]}
+        for field, value in (("page", True), ("checks", [1])):
+            invalid = json.loads(json.dumps(base))
+            invalid["cases"][0][field] = value
+            with self.assertRaises(ValueError):
+                load(invalid)
+        invalid = json.loads(json.dumps(base))
+        invalid["coordinate_tolerance"] = True
+        with self.assertRaises(ValueError):
+            load(invalid)
+        config = load(base)
+        self.assertIsInstance(config.cases, tuple)
+        self.assertIsInstance(config.cases[0].checks, tuple)
+        self.assertIsInstance(GeometryCaseConfig("case", "drawing.pdf", checks=["GRID"] ).checks, tuple)
+        with self.assertRaises(TypeError):
+            config.cases[0].checks[0] = "GRID"
+        with self.assertRaises((AttributeError, TypeError)):
+            config.cases[0].checks += ("GRID",)
+
+    def test_malformed_baselines_fail_predictably(self):
+        malformed = [[], None, {}, {"schema_version": 2, "case_results": []}, {"schema_version": 1, "case_results": "bad"}, {"schema_version": 1, "case_results": [1]}, {"schema_version": 1, "case_results": [{}]}, {"schema_version": 1, "case_results": [{"case_id": ""}]}, {"schema_version": 1, "case_results": [{"case_id": "x"}, {"case_id": "x"}]}]
+        for value in malformed:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_geometry_baseline(value)
+
+    def test_markdown_and_csv_escape_user_controlled_cells(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"schema_version": 1, "cases": [{"case_id": "=formula|row\nnext", "pdf": "drawing.pdf", "page": 1}]}), encoding="utf-8")
+            config = load_geometry_config(config_path)
+            result = run_geometry_validation(config, case_runner=lambda value: case(value.case_id, warnings=["@warning"]))
+            markdown_path, csv_path = root / "result.md", root / "result.csv"
+            write_geometry_markdown(markdown_path, result)
+            write_geometry_csv(csv_path, result)
+            markdown = markdown_path.read_text(encoding="utf-8")
+            csv = csv_path.read_text(encoding="utf-8")
+            self.assertIn("=formula\\|row<br>next", markdown)
+            self.assertIn("'=formula|row\nnext", csv)
+            self.assertIn("'@warning", csv)
+
+    def test_git_revision_is_resolved_outside_caller_working_directory(self):
+        original = Path.cwd()
+        try:
+            os.chdir(tempfile.gettempdir())
+            self.assertTrue(_git_revision())
+        finally:
+            os.chdir(original)
+
+    def test_cli_review_required_returns_nonzero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            baseline_path = root / "baseline.json"
+            config_path.write_text(json.dumps({"schema_version": 1, "cases": [{"case_id": "case-001", "pdf": "drawing.pdf", "page": 1}]}), encoding="utf-8")
+            baseline_path.write_text(json.dumps(report(case())), encoding="utf-8")
+            current = run_geometry_validation(load_geometry_config(config_path), case_runner=lambda value: case(value.case_id, horizontal=[axis("HORIZONTAL", "1", 110)]))
+            with mock.patch.object(cli, "run_geometry_validation", return_value=current):
+                self.assertNotEqual(cli.main(["validate-geometry", str(config_path), "--compare", str(baseline_path)]), 0)
+
+    def test_cli_rejects_malformed_baseline_with_friendly_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            baseline_path = root / "baseline.json"
+            config_path.write_text(json.dumps({"schema_version": 1, "cases": [{"case_id": "case-001", "pdf": "drawing.pdf", "page": 1}]}), encoding="utf-8")
+            baseline_path.write_text("null", encoding="utf-8")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                status = cli.main(["validate-geometry", str(config_path), "--compare", str(baseline_path)])
+            self.assertEqual(status, 2)
+            self.assertIn("invalid geometry comparison baseline", stderr.getvalue())

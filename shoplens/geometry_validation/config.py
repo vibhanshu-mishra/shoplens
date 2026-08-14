@@ -35,15 +35,42 @@ def load_geometry_config(path: Path) -> GeometryValidationConfig:
             raise ValueError(f"duplicate case_id: {case_id}")
         seen.add(case_id)
         page, sheet = value.get("page"), value.get("sheet")
-        if page is not None and (not isinstance(page, int) or page < 1):
+        if page is not None and (isinstance(page, bool) or not isinstance(page, int) or page < 1):
             raise ValueError(f"case {case_id} page must be a positive integer")
         if page is None and (not isinstance(sheet, str) or not sheet.strip()):
             raise ValueError(f"case {case_id} requires page or sheet")
         checks = value.get("checks", ["GRID", "LOCALIZATION"])
-        if not isinstance(checks, list) or not checks or any(item not in VALID_CHECKS for item in checks):
+        if (
+            not isinstance(checks, list)
+            or not checks
+            or any(not isinstance(item, str) or item not in VALID_CHECKS for item in checks)
+        ):
             raise ValueError(f"case {case_id} checks must contain GRID and/or LOCALIZATION")
-        cases.append(GeometryCaseConfig(case_id, pdf, page, sheet, list(checks)))
+        cases.append(GeometryCaseConfig(case_id, pdf, page, sheet, tuple(checks)))
     tolerance = values.get("coordinate_tolerance", 2.0)
-    if not isinstance(tolerance, (int, float)) or tolerance <= 0:
+    if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or tolerance <= 0:
         raise ValueError("coordinate_tolerance must be greater than zero")
-    return GeometryValidationConfig(SCHEMA_VERSION, cases, float(tolerance))
+    return GeometryValidationConfig(SCHEMA_VERSION, tuple(cases), float(tolerance))
+
+
+def validate_geometry_baseline(value):
+    """Validate the public shape of a baseline before comparison."""
+
+    if not isinstance(value, dict):
+        raise ValueError("geometry baseline must be a JSON object")
+    if value.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(f"geometry baseline schema_version must be {SCHEMA_VERSION}")
+    case_results = value.get("case_results")
+    if not isinstance(case_results, list):
+        raise ValueError("geometry baseline case_results must be a list")
+    seen = set()
+    for index, result in enumerate(case_results, start=1):
+        if not isinstance(result, dict):
+            raise ValueError(f"geometry baseline case result {index} must be an object")
+        case_id = result.get("case_id")
+        if not isinstance(case_id, str) or not case_id.strip():
+            raise ValueError(f"geometry baseline case result {index} requires a non-empty case_id")
+        if case_id in seen:
+            raise ValueError(f"duplicate geometry baseline case_id: {case_id}")
+        seen.add(case_id)
+    return value

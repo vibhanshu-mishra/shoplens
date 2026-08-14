@@ -155,9 +155,13 @@ def _grid_system_distribution(result) -> Dict[str, int]:
 
 
 def _git_revision() -> Optional[str]:
+    repo_root = Path(__file__).resolve().parents[2]
     try:
-        return subprocess.run(["git", "rev-parse", "HEAD"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=2,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
 
 

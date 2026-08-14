@@ -1,7 +1,7 @@
 """Privacy-safe, compact results for local geometry regression checks."""
 
-from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -10,14 +10,20 @@ class GeometryCaseConfig:
     pdf: str
     page: Optional[int] = None
     sheet: Optional[str] = None
-    checks: List[str] = field(default_factory=lambda: ["GRID", "LOCALIZATION"])
+    checks: Tuple[str, ...] = ("GRID", "LOCALIZATION")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "checks", tuple(self.checks))
 
 
 @dataclass(frozen=True)
 class GeometryValidationConfig:
     schema_version: int
-    cases: List[GeometryCaseConfig]
+    cases: Tuple[GeometryCaseConfig, ...]
     coordinate_tolerance: float = 2.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "cases", tuple(self.cases))
 
 
 @dataclass

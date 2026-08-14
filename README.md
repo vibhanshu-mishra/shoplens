@@ -566,6 +566,10 @@ changes, and localization shifts require review rather than being called
 improvements automatically. Normal reports identify only `case_id`; `--debug`
 is required to include configured source paths in JSON.
 
+The command exits successfully only when every compared case is unchanged (or
+when no comparison is requested). Regressions, review-required changes, new or
+removed cases, and execution errors return a non-zero exit status.
+
 ---
 
 ## Why Structural PDFs Are Difficult
