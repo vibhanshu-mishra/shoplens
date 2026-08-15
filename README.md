@@ -4,7 +4,7 @@
 
 ShopLens turns structural drawing sets into structured, explainable data.
 
-It reads native structural PDFs, identifies sheets, extracts structural steel section labels, detects drawing grid systems, and localizes section references relative to those grids — while preserving the evidence behind each result.
+It reads native structural PDFs, identifies sheets, extracts structural steel section labels, detects drawing grid systems, and localizes section references relative to those grids while preserving the evidence behind each result.
 
 ShopLens is designed for structural drawings from different engineers, projects, and drawing conventions rather than a single fixed template.
 
@@ -467,10 +467,6 @@ ShopLens prefers multiple physical signals before promoting drawing information 
 Ambiguous or unsupported observations remain ambiguous or unassigned.
 
 ShopLens should not fabricate a clean drawing model from incomplete evidence.
-
-### Cross-firm behavior
-
-The detector is developed against structural drawings from multiple sources and drawing conventions rather than tuning exclusively to one engineer's graphics.
 
 ### Deterministic first
 
