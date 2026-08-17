@@ -324,6 +324,17 @@ class GeometryConfigAndReportingTests(unittest.TestCase):
             with self.subTest(coordinate=coordinate), self.assertRaisesRegex(ValueError, "finite"):
                 validate_geometry_baseline(value)
 
+    def test_baseline_axis_coordinates_accept_normal_int_and_float(self):
+        value = report(case(horizontal=[axis("HORIZONTAL", "1", 10)], vertical=[axis("VERTICAL", "A", 10.25)]))
+        self.assertIs(validate_geometry_baseline(value), value)
+
+    def test_extremely_large_integer_coordinates_are_value_errors(self):
+        for coordinate in (10 ** 10000, -(10 ** 10000)):
+            value = report(case(horizontal=[axis("HORIZONTAL", "1", coordinate)]))
+            with self.subTest(sign="negative" if coordinate < 0 else "positive"):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    validate_geometry_baseline(value)
+
     def test_json_nan_coordinate_is_rejected_as_invalid_baseline(self):
         value = json.loads(
             '{"schema_version": 1, "case_results": [{"case_id": "nan", '
@@ -387,6 +398,24 @@ class GeometryConfigAndReportingTests(unittest.TestCase):
             baseline_path = root / "baseline.json"
             config_path.write_text(json.dumps({"schema_version": 1, "cases": [{"case_id": "case-001", "pdf": "drawing.pdf", "page": 1}]}), encoding="utf-8")
             baseline_path.write_text("null", encoding="utf-8")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                status = cli.main(["validate-geometry", str(config_path), "--compare", str(baseline_path)])
+            self.assertEqual(status, 2)
+            self.assertIn("invalid geometry comparison baseline", stderr.getvalue())
+
+    def test_cli_rejects_extremely_large_integer_baseline_with_friendly_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            baseline_path = root / "baseline.json"
+            config_path.write_text(json.dumps({"schema_version": 1, "cases": [{"case_id": "case-001", "pdf": "drawing.pdf", "page": 1}]}), encoding="utf-8")
+            baseline_path.write_text(
+                '{"schema_version": 1, "case_results": [{"case_id": "huge", '
+                '"grid": {"horizontal_axes": [{"orientation": "HORIZONTAL", '
+                '"label": "1", "coordinate": 1e10000}]}}]}',
+                encoding="utf-8",
+            )
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr):
                 status = cli.main(["validate-geometry", str(config_path), "--compare", str(baseline_path)])

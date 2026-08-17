@@ -118,5 +118,10 @@ def _validate_axes(grid, field_name: str, index: int) -> None:
         coordinate = axis.get("coordinate")
         if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)):
             raise ValueError(f"geometry baseline case result {index} {field_name}[{axis_index}] requires numeric coordinate")
-        if not math.isfinite(float(coordinate)):
-            raise ValueError(f"geometry baseline case result {index} {field_name}[{axis_index}] coordinate must be finite")
+        finite_error = f"geometry baseline case result {index} {field_name}[{axis_index}] coordinate must be finite"
+        try:
+            converted_coordinate = float(coordinate)
+        except (OverflowError, ValueError):
+            raise ValueError(finite_error) from None
+        if not math.isfinite(converted_coordinate):
+            raise ValueError(finite_error)
