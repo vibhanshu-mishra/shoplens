@@ -1,7 +1,6 @@
 """Conservative, coordinate-aware comparison for compact geometry summaries."""
 
 from collections import Counter, defaultdict
-from functools import lru_cache
 from typing import Any, Dict, List, Sequence, Tuple
 
 
@@ -144,32 +143,53 @@ def _match_axes(
 
 
 def _minimum_cost_pairs(before: Sequence[Dict[str, Any]], now: Sequence[Dict[str, Any]]) -> List[Tuple[int, int]]:
-    """Return a deterministic minimum-cost one-to-one coordinate assignment."""
+    """Return an exact minimum-cost monotonic 1D assignment in O(n*m)."""
 
     if not before or not now:
         return []
     if len(before) > len(now):
-        return [(new_index, old_index) for new_index, old_index in _minimum_cost_pairs(now, before)]
+        return [
+            (swapped_new_index, swapped_old_index)
+            for swapped_old_index, swapped_new_index in _minimum_cost_pairs(now, before)
+        ]
 
-    @lru_cache(maxsize=None)
-    def solve(old_index: int, used_new: int):
-        if old_index == len(before):
-            return 0.0, ()
-        best = None
-        old_coordinate = float(before[old_index]["coordinate"])
-        for new_index, new_axis in enumerate(now):
-            if used_new & (1 << new_index):
-                continue
-            tail_cost, tail_pairs = solve(old_index + 1, used_new | (1 << new_index))
-            candidate = (
-                abs(old_coordinate - float(new_axis["coordinate"])) + tail_cost,
-                ((old_index, new_index),) + tail_pairs,
+    old_order = sorted(
+        enumerate(before), key=lambda item: (float(item[1]["coordinate"]), item[0])
+    )
+    new_order = sorted(
+        enumerate(now), key=lambda item: (float(item[1]["coordinate"]), item[0])
+    )
+    old_axes = [axis for _, axis in old_order]
+    new_axes = [axis for _, axis in new_order]
+    old_count, new_count = len(old_axes), len(new_axes)
+    infinity = float("inf")
+    costs = [[infinity] * (new_count + 1) for _ in range(old_count + 1)]
+    take = [[False] * (new_count + 1) for _ in range(old_count + 1)]
+    costs[0] = [0.0] * (new_count + 1)
+    for old_index in range(1, old_count + 1):
+        old_coordinate = float(old_axes[old_index - 1]["coordinate"])
+        for new_index in range(1, new_count + 1):
+            skip_cost = costs[old_index][new_index - 1]
+            take_cost = costs[old_index - 1][new_index - 1] + abs(
+                old_coordinate - float(new_axes[new_index - 1]["coordinate"])
             )
-            if best is None or candidate < best:
-                best = candidate
-        return best
+            if take_cost <= skip_cost:
+                costs[old_index][new_index] = take_cost
+                take[old_index][new_index] = True
+            else:
+                costs[old_index][new_index] = skip_cost
 
-    return list(solve(0, 0)[1])
+    pairs = []
+    old_index, new_index = old_count, new_count
+    while old_index:
+        if take[old_index][new_index]:
+            pairs.append((old_order[old_index - 1][0], new_order[new_index - 1][0]))
+            old_index -= 1
+            new_index -= 1
+        else:
+            new_index -= 1
+    pairs.reverse()
+    return pairs
 
 
 def _pair_secondary_systems(before: Sequence[Dict[str, Any]], now: Sequence[Dict[str, Any]]) -> List[Tuple[int, int]]:

@@ -12,7 +12,7 @@ VALID_CHECKS = {"GRID", "LOCALIZATION"}
 
 def load_geometry_config(path: Path) -> GeometryValidationConfig:
     values = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(values, dict) or values.get("schema_version") != SCHEMA_VERSION:
+    if not isinstance(values, dict) or not _valid_schema_version(values.get("schema_version")):
         raise ValueError(f"schema_version must be {SCHEMA_VERSION}")
     unknown = sorted(set(values) - {"schema_version", "cases", "coordinate_tolerance"})
     if unknown:
@@ -58,7 +58,7 @@ def validate_geometry_baseline(value):
 
     if not isinstance(value, dict):
         raise ValueError("geometry baseline must be a JSON object")
-    if value.get("schema_version") != SCHEMA_VERSION:
+    if not _valid_schema_version(value.get("schema_version")):
         raise ValueError(f"geometry baseline schema_version must be {SCHEMA_VERSION}")
     case_results = value.get("case_results")
     if not isinstance(case_results, list):
@@ -73,4 +73,47 @@ def validate_geometry_baseline(value):
         if case_id in seen:
             raise ValueError(f"duplicate geometry baseline case_id: {case_id}")
         seen.add(case_id)
+        _validate_case_result_fields(result, index)
     return value
+
+
+def _valid_schema_version(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value == SCHEMA_VERSION
+
+
+def _validate_case_result_fields(result, index: int) -> None:
+    grid = result.get("grid")
+    if grid is not None:
+        if not isinstance(grid, dict):
+            raise ValueError(f"geometry baseline case result {index} grid must be an object or null")
+        _validate_axes(grid, "horizontal_axes", index)
+        _validate_axes(grid, "vertical_axes", index)
+        secondary = grid.get("secondary_systems", [])
+        if not isinstance(secondary, list):
+            raise ValueError(f"geometry baseline case result {index} secondary_systems must be a list")
+        for system_index, system in enumerate(secondary, start=1):
+            if not isinstance(system, dict):
+                raise ValueError(f"geometry baseline case result {index} secondary system {system_index} must be an object")
+            _validate_axes(system, "horizontal_axes", index)
+            _validate_axes(system, "vertical_axes", index)
+    localization = result.get("localization")
+    if localization is not None:
+        if not isinstance(localization, dict):
+            raise ValueError(f"geometry baseline case result {index} localization must be an object or null")
+        distribution = localization.get("grid_system_distribution", {})
+        if not isinstance(distribution, dict):
+            raise ValueError(f"geometry baseline case result {index} grid_system_distribution must be an object")
+
+
+def _validate_axes(grid, field_name: str, index: int) -> None:
+    axes = grid.get(field_name, [])
+    if not isinstance(axes, list):
+        raise ValueError(f"geometry baseline case result {index} {field_name} must be a list")
+    for axis_index, axis in enumerate(axes, start=1):
+        if not isinstance(axis, dict):
+            raise ValueError(f"geometry baseline case result {index} {field_name}[{axis_index}] must be an object")
+        if not isinstance(axis.get("label"), str) or not isinstance(axis.get("orientation"), str):
+            raise ValueError(f"geometry baseline case result {index} {field_name}[{axis_index}] requires string label and orientation")
+        coordinate = axis.get("coordinate")
+        if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)):
+            raise ValueError(f"geometry baseline case result {index} {field_name}[{axis_index}] requires numeric coordinate")

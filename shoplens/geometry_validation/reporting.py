@@ -85,6 +85,6 @@ def _markdown_cell(value: Any) -> str:
 def _csv_safe_cell(value: Any) -> Any:
     """Prevent spreadsheet formula evaluation for user-controlled string cells."""
 
-    if isinstance(value, str) and value and (value[0] in "=+-@\t\r\n"):
+    if isinstance(value, str) and value and value.lstrip() and value.lstrip()[0] in "=+-@\t\r\n":
         return "'" + value
     return value

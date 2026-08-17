@@ -23,6 +23,8 @@ from shoplens.geometry_validation import (
     validate_geometry_baseline,
 )
 from shoplens.geometry_validation.models import GeometryValidationResult
+from shoplens.geometry_validation.compare import _minimum_cost_pairs
+from shoplens.geometry_validation.reporting import _csv_safe_cell
 from shoplens.geometry_validation.runner import _git_revision
 
 
@@ -109,6 +111,29 @@ class GeometryComparisonTests(unittest.TestCase):
         baseline = case(horizontal=[axis("HORIZONTAL", "A", 0), axis("HORIZONTAL", "A", 5)])
         current = case(horizontal=[axis("HORIZONTAL", "A", 4), axis("HORIZONTAL", "A", 6)])
         self.assertEqual(self.compare(current, baseline, tolerance=5.0)["summary"], {"UNCHANGED": 1})
+
+    def test_minimum_cost_pairs_preserve_old_new_indices_for_all_sizes(self):
+        old_more = [axis("HORIZONTAL", "A", value) for value in (10, 20, 30)]
+        new_fewer = [axis("HORIZONTAL", "A", value) for value in (11, 31)]
+        self.assertEqual(_minimum_cost_pairs(old_more, new_fewer), [(0, 0), (2, 1)])
+
+        old_fewer = [axis("HORIZONTAL", "A", value) for value in (10, 30)]
+        new_more = [axis("HORIZONTAL", "A", value) for value in (11, 20, 31)]
+        self.assertEqual(_minimum_cost_pairs(old_fewer, new_more), [(0, 0), (1, 2)])
+
+        old_equal = [axis("HORIZONTAL", "A", value) for value in (20, 10)]
+        new_equal = [axis("HORIZONTAL", "A", value) for value in (11, 21)]
+        self.assertEqual(_minimum_cost_pairs(old_equal, new_equal), [(1, 0), (0, 1)])
+        self.assertEqual(_minimum_cost_pairs([], new_equal), [])
+        self.assertEqual(_minimum_cost_pairs(old_equal, []), [])
+
+    def test_minimum_cost_pairs_handles_25_axis_groups_polynomially(self):
+        for old_count, new_count in ((20, 20), (25, 20), (20, 25)):
+            old = [axis("HORIZONTAL", "A", value) for value in range(old_count)]
+            new = [axis("HORIZONTAL", "A", value + 0.25) for value in range(new_count)]
+            pairs = _minimum_cost_pairs(old, new)
+            self.assertEqual(len(pairs), min(old_count, new_count))
+            self.assertEqual(pairs, sorted(pairs))
 
     def test_intersection_grid_system_and_localization_changes_are_reported(self):
         current = case(
@@ -243,10 +268,20 @@ class GeometryConfigAndReportingTests(unittest.TestCase):
             config.cases[0].checks += ("GRID",)
 
     def test_malformed_baselines_fail_predictably(self):
-        malformed = [[], None, {}, {"schema_version": 2, "case_results": []}, {"schema_version": 1, "case_results": "bad"}, {"schema_version": 1, "case_results": [1]}, {"schema_version": 1, "case_results": [{}]}, {"schema_version": 1, "case_results": [{"case_id": ""}]}, {"schema_version": 1, "case_results": [{"case_id": "x"}, {"case_id": "x"}]}]
+        malformed = [[], None, {}, {"schema_version": 2, "case_results": []}, {"schema_version": True, "case_results": []}, {"schema_version": False, "case_results": []}, {"schema_version": 1.0, "case_results": []}, {"schema_version": "1", "case_results": []}, {"schema_version": None, "case_results": []}, {"schema_version": 1, "case_results": "bad"}, {"schema_version": 1, "case_results": [1]}, {"schema_version": 1, "case_results": [{}]}, {"schema_version": 1, "case_results": [{"case_id": ""}]}, {"schema_version": 1, "case_results": [{"case_id": "x"}, {"case_id": "x"}]}]
         for value in malformed:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_geometry_baseline(value)
+
+    def test_baseline_grid_and_localization_must_be_objects_or_null(self):
+        for field in ("grid", "localization"):
+            for invalid in ([], "bad", 1):
+                value = {"schema_version": 1, "case_results": [{"case_id": "case-001", field: invalid}]}
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                    validate_geometry_baseline(value)
+        invalid_axes = {"schema_version": 1, "case_results": [{"case_id": "case-001", "grid": {"horizontal_axes": [1]}}]}
+        with self.assertRaises(ValueError):
+            validate_geometry_baseline(invalid_axes)
 
     def test_markdown_and_csv_escape_user_controlled_cells(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -263,6 +298,12 @@ class GeometryConfigAndReportingTests(unittest.TestCase):
             self.assertIn("=formula\\|row<br>next", markdown)
             self.assertIn("'=formula|row\nnext", csv)
             self.assertIn("'@warning", csv)
+
+    def test_csv_formula_guard_ignores_leading_whitespace_for_detection(self):
+        for value in ("=formula", " =formula", "   +cmd", "\t=cmd", "\r@cmd", "\n-formula"):
+            self.assertEqual(_csv_safe_cell(value), "'" + value)
+        self.assertEqual(_csv_safe_cell(" ordinary"), " ordinary")
+        self.assertEqual(_csv_safe_cell("ordinary"), "ordinary")
 
     def test_git_revision_is_resolved_outside_caller_working_directory(self):
         original = Path.cwd()
@@ -282,6 +323,12 @@ class GeometryConfigAndReportingTests(unittest.TestCase):
             current = run_geometry_validation(load_geometry_config(config_path), case_runner=lambda value: case(value.case_id, horizontal=[axis("HORIZONTAL", "1", 110)]))
             with mock.patch.object(cli, "run_geometry_validation", return_value=current):
                 self.assertNotEqual(cli.main(["validate-geometry", str(config_path), "--compare", str(baseline_path)]), 0)
+
+    def test_every_non_unchanged_comparison_status_fails(self):
+        for status in ("UNCHANGED", "REGRESSION", "REVIEW_REQUIRED", "ERROR", "NEW_CASE", "REMOVED_CASE", "IMPROVEMENT"):
+            with self.subTest(status=status):
+                self.assertEqual(cli._geometry_comparison_failed({"summary": {status: 1}}), status != "UNCHANGED")
+        self.assertTrue(cli._geometry_comparison_failed({"summary": {"UNCHANGED": 1, "IMPROVEMENT": 1}}))
 
     def test_cli_rejects_malformed_baseline_with_friendly_error(self):
         with tempfile.TemporaryDirectory() as directory:

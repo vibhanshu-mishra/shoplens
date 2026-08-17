@@ -1426,11 +1426,18 @@ def _run_validate_geometry(args: argparse.Namespace) -> int:
         print("Baseline comparison:")
         for change in result.comparison["case_changes"]:
             print(f"{change['change']} | {change['case_id']}")
-    comparison_failed = bool(
-        result.comparison
-        and any(result.comparison["summary"].get(status) for status in ("REGRESSION", "REVIEW_REQUIRED", "ERROR", "NEW_CASE", "REMOVED_CASE"))
-    )
+    comparison_failed = _geometry_comparison_failed(result.comparison)
     return 1 if comparison_failed or any(item.execution_status != "PASS" for item in result.case_results) else 0
+
+
+def _geometry_comparison_failed(comparison: Optional[Dict[str, object]]) -> bool:
+    if not comparison:
+        return False
+    return any(
+        count > 0
+        for status, count in comparison.get("summary", {}).items()
+        if status != "UNCHANGED"
+    )
 
 
 def _validation_stage_detail(stage) -> str:
