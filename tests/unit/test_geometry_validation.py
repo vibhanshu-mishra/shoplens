@@ -4,6 +4,7 @@ import json
 import contextlib
 import io
 import os
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -410,14 +411,26 @@ class GeometryConfigAndReportingTests(unittest.TestCase):
             config_path = root / "config.json"
             baseline_path = root / "baseline.json"
             config_path.write_text(json.dumps({"schema_version": 1, "cases": [{"case_id": "case-001", "pdf": "drawing.pdf", "page": 1}]}), encoding="utf-8")
+            huge_integer = "1" + ("0" * 10000)
             baseline_path.write_text(
                 '{"schema_version": 1, "case_results": [{"case_id": "huge", '
                 '"grid": {"horizontal_axes": [{"orientation": "HORIZONTAL", '
-                '"label": "1", "coordinate": 1e10000}]}}]}',
+                '"label": "1", "coordinate": ' + huge_integer + '}]}}]}',
                 encoding="utf-8",
             )
             stderr = io.StringIO()
-            with contextlib.redirect_stderr(stderr):
-                status = cli.main(["validate-geometry", str(config_path), "--compare", str(baseline_path)])
+            get_limit = getattr(sys, "get_int_max_str_digits", None)
+            set_limit = getattr(sys, "set_int_max_str_digits", None)
+            previous_limit = get_limit() if get_limit is not None else None
+            if set_limit is not None and previous_limit not in (None, 0) and previous_limit < len(huge_integer):
+                set_limit(len(huge_integer) + 1)
+            try:
+                parsed = json.loads(baseline_path.read_text(encoding="utf-8"))
+                self.assertIsInstance(parsed["case_results"][0]["grid"]["horizontal_axes"][0]["coordinate"], int)
+                with contextlib.redirect_stderr(stderr):
+                    status = cli.main(["validate-geometry", str(config_path), "--compare", str(baseline_path)])
+            finally:
+                if set_limit is not None and previous_limit is not None:
+                    set_limit(previous_limit)
             self.assertEqual(status, 2)
             self.assertIn("invalid geometry comparison baseline", stderr.getvalue())
