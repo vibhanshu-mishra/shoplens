@@ -43,11 +43,12 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# Local confidential evaluation drawings
-/Shoplens-evaluation/
-
 # Local strategic roadmap
 /SHOPLENS_FUTURE_ROADMAP.md
 
+# Local confidential evaluation drawings
+/Shoplens-evaluation/
+
 # Optional repository-local validation reports
 /validation-output/
+/geometry-validation-output/
