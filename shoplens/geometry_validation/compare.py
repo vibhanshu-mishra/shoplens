@@ -3,10 +3,14 @@
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Sequence, Tuple
 
+from .config import validate_geometry_baseline
+
 
 def compare_geometry_reports(
     current: Dict[str, Any], baseline: Dict[str, Any], tolerance: float
 ) -> Dict[str, Any]:
+    validate_geometry_baseline(current)
+    validate_geometry_baseline(baseline)
     current_cases = _index_cases(current.get("case_results", []), "current")
     baseline_cases = _index_cases(baseline.get("case_results", []), "baseline")
     changes = []
@@ -173,7 +177,7 @@ def _minimum_cost_pairs(before: Sequence[Dict[str, Any]], now: Sequence[Dict[str
             take_cost = costs[old_index - 1][new_index - 1] + abs(
                 old_coordinate - float(new_axes[new_index - 1]["coordinate"])
             )
-            if take_cost <= skip_cost:
+            if take_cost < skip_cost:
                 costs[old_index][new_index] = take_cost
                 take[old_index][new_index] = True
             else:

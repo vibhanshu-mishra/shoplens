@@ -112,6 +112,18 @@ class GeometryComparisonTests(unittest.TestCase):
         current = case(horizontal=[axis("HORIZONTAL", "A", 4), axis("HORIZONTAL", "A", 6)])
         self.assertEqual(self.compare(current, baseline, tolerance=5.0)["summary"], {"UNCHANGED": 1})
 
+    def test_equal_cost_pairing_preserves_earlier_current_axis(self):
+        old = [axis("HORIZONTAL", "A", 0)]
+        current = [axis("HORIZONTAL", "A", -1), axis("HORIZONTAL", "A", 1)]
+        self.assertEqual(_minimum_cost_pairs(old, current), [(0, 0)])
+
+    def test_equal_cost_repeated_labels_are_deterministic(self):
+        old = [axis("HORIZONTAL", "A", coordinate) for coordinate in (0, 10)]
+        current = [axis("HORIZONTAL", "A", coordinate) for coordinate in (-1, 1, 9, 11)]
+        expected = [(0, 0), (1, 2)]
+        for _ in range(10):
+            self.assertEqual(_minimum_cost_pairs(old, current), expected)
+
     def test_minimum_cost_pairs_preserve_old_new_indices_for_all_sizes(self):
         old_more = [axis("HORIZONTAL", "A", value) for value in (10, 20, 30)]
         new_fewer = [axis("HORIZONTAL", "A", value) for value in (11, 31)]
@@ -282,6 +294,44 @@ class GeometryConfigAndReportingTests(unittest.TestCase):
         invalid_axes = {"schema_version": 1, "case_results": [{"case_id": "case-001", "grid": {"horizontal_axes": [1]}}]}
         with self.assertRaises(ValueError):
             validate_geometry_baseline(invalid_axes)
+
+    def test_baseline_grid_and_localization_supported_object_states(self):
+        supported = [
+            {"schema_version": 1, "case_results": [{"case_id": "missing"}]},
+            {"schema_version": 1, "case_results": [{"case_id": "null", "grid": None, "localization": None}]},
+            {"schema_version": 1, "case_results": [{"case_id": "empty", "grid": {}, "localization": {}}]},
+            report(case(
+                "structured",
+                secondary=[system("S-A", [axis("HORIZONTAL", "1", 10)], [axis("VERTICAL", "A", 20)])],
+                localization={
+                    "total_section_detections": 2,
+                    "complete_bay": 1,
+                    "on_axis": 1,
+                    "outside_grid": 0,
+                    "ambiguous": 0,
+                    "unlocalized": 0,
+                    "grid_system_distribution": {"PRIMARY": 1, "S-A": 1},
+                },
+            )),
+        ]
+        for value in supported:
+            with self.subTest(case_id=value["case_results"][0]["case_id"]):
+                self.assertIs(validate_geometry_baseline(value), value)
+
+    def test_baseline_axis_coordinates_must_be_finite(self):
+        for coordinate in (float("nan"), float("inf"), float("-inf")):
+            value = report(case(horizontal=[axis("HORIZONTAL", "1", coordinate)]))
+            with self.subTest(coordinate=coordinate), self.assertRaisesRegex(ValueError, "finite"):
+                validate_geometry_baseline(value)
+
+    def test_json_nan_coordinate_is_rejected_as_invalid_baseline(self):
+        value = json.loads(
+            '{"schema_version": 1, "case_results": [{"case_id": "nan", '
+            '"grid": {"horizontal_axes": [{"orientation": "HORIZONTAL", '
+            '"label": "1", "coordinate": NaN}]}}]}'
+        )
+        with self.assertRaisesRegex(ValueError, "finite"):
+            validate_geometry_baseline(value)
 
     def test_markdown_and_csv_escape_user_controlled_cells(self):
         with tempfile.TemporaryDirectory() as directory:
